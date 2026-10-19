@@ -1,0 +1,48 @@
+{
+    "name": "@stefanskrobanski/raymond",
+    "version": "0.1.0",
+    "description": "A progressive path tracer for WebGPU, in plain JavaScript with no dependencies.",
+    "keywords": [
+        "3d",
+        "webgpu",
+        "path-tracing",
+        "ray-tracing",
+        "renderer",
+        "graphics"
+    ],
+    "license": "MIT",
+    "author": "Stefan Skrobanski",
+    "homepage": "https://stefanskrobanski.github.io/Raymond/",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/StefanSkrobanski/Raymond.git"
+    },
+    "type": "module",
+    "exports": {
+        ".": {
+            "types": "./types/index.d.mts",
+            "default": "./src/index.mjs"
+        }
+    },
+    "files": [
+        "src",
+        "types"
+    ],
+    "sideEffects": false,
+    "publishConfig": {
+        "access": "public"
+    },
+    "scripts": {
+        "test": "node --test \"tests/**/*.test.mjs\"",
+        "test:unit": "node --test \"tests/unit/*.test.mjs\"",
+        "test:browser": "node --test \"tests/browser/*.test.mjs\"",
+        "test:types": "npm run build:types && tsc -p tests/types/tsconfig.json",
+        "typecheck": "tsc -p tsconfig.json",
+        "build:types": "tsc -p tsconfig.types.json",
+        "prepack": "npm run build:types"
+    },
+    "devDependencies": {
+        "playwright": "1.56.1",
+        "typescript": "7.0.2"
+    }
+}

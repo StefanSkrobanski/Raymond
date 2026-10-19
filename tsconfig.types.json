@@ -1,0 +1,13 @@
+{
+    // Writes types/*.d.mts from the library's JSDoc (npm run build:types,
+    // run automatically by npm pack and npm publish).
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "noEmit": false,
+        "declaration": true,
+        "emitDeclarationOnly": true,
+        "outDir": "types",
+        "rootDir": "src"
+    },
+    "include": ["src/**/*.mjs"]
+}

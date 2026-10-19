@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raymond</title>
+    <meta name="description" content="A progressive path tracer for WebGPU, in plain JavaScript.">
+    <meta name="theme-color" content="#0b0d12">
+
+    <script>
+        // Apply the theme before the first paint, so dark mode never flashes
+        // white. main.mjs keeps it up to date after this. Mirrors
+        // Settings.mjs, which can't be imported from a classic script.
+        try {
+            const stored = JSON.parse(localStorage.getItem("raymond-settings") || "{}").theme;
+            const dark = stored === "dark" ||
+                (stored !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+            document.documentElement.dataset.theme = dark ? "dark" : "light";
+        }
+        catch {
+            // Storage blocked: main.mjs sets the theme from the defaults.
+        }
+    </script>
+    <style>
+        /* Colours for the panels in the light and dark themes. The image
+           itself sits on black either way. */
+        :root {
+            color-scheme: light;
+            --text: #111111;
+            --muted: #555b66;
+            --surface: rgba(255, 255, 255, 0.92);
+            --button: rgba(255, 255, 255, 0.85);
+            --border: rgba(0, 0, 0, 0.22);
+            --shadow: rgba(0, 0, 0, 0.25);
+            --accent: #d9480f;
+            --error: #b00020;
+        }
+
+        :root[data-theme="dark"] {
+            color-scheme: dark;
+            --text: #e8eaf0;
+            --muted: #9aa1ad;
+            --surface: rgba(20, 23, 31, 0.9);
+            --button: rgba(30, 34, 44, 0.85);
+            --border: rgba(255, 255, 255, 0.2);
+            --shadow: rgba(0, 0, 0, 0.6);
+            --accent: #ff8a4c;
+            --error: #ff6b81;
+        }
+
+        /* The canvas fills the whole window; its pixel size is set by
+           main.mjs from the resolution setting, and CSS scales it up.
+           touch-action: none hands touches to OrbitControls instead of
+           letting the browser scroll or zoom the page. */
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #000000;
+            color: var(--text);
+            font-family: system-ui, sans-serif;
+            font-size: 15px;
+        }
+
+        #view {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+            height: 100dvh;
+            touch-action: none;
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-touch-callout: none;
+        }
+
+        /* How far the image has got, top left. */
+        #hud {
+            position: fixed;
+            top: calc(12px + env(safe-area-inset-top));
+            left: calc(12px + env(safe-area-inset-left));
+            padding: 6px 10px;
+            border-radius: 8px;
+            background: var(--surface);
+            box-shadow: 0 2px 12px var(--shadow);
+            font-variant-numeric: tabular-nums;
+            font-size: 13px;
+            pointer-events: none;
+        }
+
+        #hud strong {
+            margin-right: 6px;
+        }
+
+        #progress {
+            height: 3px;
+            margin-top: 5px;
+            border-radius: 2px;
+            background: var(--border);
+            overflow: hidden;
+        }
+
+        #progress div {
+            height: 100%;
+            width: 0;
+            background: var(--accent);
+        }
+
+        #toolbar {
+            position: fixed;
+            right: calc(16px + env(safe-area-inset-right));
+            bottom: calc(16px + env(safe-area-inset-bottom));
+            display: flex;
+            gap: 10px;
+        }
+
+        #toolbar button {
+            width: 44px;
+            height: 44px;
+            border: 1px solid var(--border);
+            border-radius: 50%;
+            background: var(--button);
+            color: var(--text);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+            box-shadow: 0 2px 10px var(--shadow);
+        }
+
+        #toolbar svg {
+            fill: currentColor;
+        }
+
+        /* Settings panel, sliding in from the right. */
+        #settings {
+            position: fixed;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            width: min(320px, calc(100vw - 56px));
+            box-sizing: border-box;
+            padding: calc(12px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right))
+                     calc(16px + env(safe-area-inset-bottom)) 16px;
+            overflow-y: auto;
+            background: var(--surface);
+            -webkit-backdrop-filter: blur(12px);
+            backdrop-filter: blur(12px);
+            box-shadow: -4px 0 24px var(--shadow);
+            transform: translateX(105%);
+            transition: transform 0.25s ease;
+        }
+
+        #settings.open {
+            transform: none;
+        }
+
+        #settings header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        #settings h2 {
+            margin: 0;
+            font-size: 18px;
+        }
+
+        #settings-close {
+            width: 44px;
+            height: 44px;
+            border: none;
+            background: none;
+            color: inherit;
+            font-size: 22px;
+            cursor: pointer;
+        }
+
+        #settings label {
+            display: block;
+            margin-top: 14px;
+            font-weight: 600;
+        }
+
+        #settings label output {
+            float: right;
+            font-weight: normal;
+            color: var(--muted);
+            font-variant-numeric: tabular-nums;
+        }
+
+        #settings select,
+        #settings input[type="range"] {
+            display: block;
+            width: 100%;
+            margin-top: 6px;
+            box-sizing: border-box;
+        }
+
+        #settings select {
+            min-height: 40px;
+            padding: 0 8px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--button);
+            color: var(--text);
+            font: inherit;
+        }
+
+        #settings input[type="range"] {
+            accent-color: var(--accent);
+            min-height: 32px;
+        }
+
+        #settings label.check {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        #settings label.check input {
+            width: 20px;
+            height: 20px;
+            margin: 0;
+            accent-color: var(--accent);
+        }
+
+        #settings .note {
+            margin: 4px 0 0;
+            color: var(--muted);
+            font-size: 13px;
+            line-height: 1.4;
+        }
+
+        #settings .help {
+            margin-top: 20px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border);
+        }
+
+        #settings a {
+            color: var(--accent);
+        }
+
+        /* A brief message, such as where the focus was set. */
+        #toast {
+            position: fixed;
+            left: 50%;
+            bottom: calc(80px + env(safe-area-inset-bottom));
+            transform: translateX(-50%);
+            padding: 8px 14px;
+            border-radius: 18px;
+            background: var(--surface);
+            box-shadow: 0 2px 12px var(--shadow);
+            opacity: 0;
+            transition: opacity 0.2s ease;
+            pointer-events: none;
+            white-space: nowrap;
+        }
+
+        #toast.show {
+            opacity: 1;
+        }
+
+        /* Shown in place of the image when something goes wrong. */
+        #error {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            background: #0b0d12;
+            color: #e8eaf0;
+            text-align: center;
+            line-height: 1.5;
+        }
+
+        #error[hidden] {
+            display: none;
+        }
+
+        #error div {
+            max-width: 34em;
+        }
+
+        #error h1 {
+            font-size: 22px;
+            color: #ff8a4c;
+        }
+
+        #error pre {
+            white-space: pre-wrap;
+            text-align: left;
+            font-size: 13px;
+            color: #ff6b81;
+        }
+
+        #error a {
+            color: #ff8a4c;
+        }
+    </style>
+
+    <script>
+        // Shows the first error in #error instead of a blank page. A classic
+        // script, so it still runs if main.mjs fails to load.
+        function showError(title, detail) {
+            const panel = document.getElementById("error");
+            if (!panel || !panel.hidden)
+                return;
+            panel.querySelector("h1").textContent = title;
+            panel.querySelector("pre").textContent = detail || "";
+            panel.hidden = false;
+        }
+
+        window.addEventListener("error", (e) => {
+            const target = e.target;
+            if (target && target !== window && (target.src || target.href))
+                showError("Couldn't load part of the page", target.src || target.href);
+            else
+                showError("Something went wrong", e.message);
+        }, true);
+
+        window.addEventListener("unhandledrejection", (e) => {
+            showError("Something went wrong", String(e.reason && e.reason.message || e.reason));
+        });
+    </script>
+    <script type="module" src="main.mjs"></script>
+</head>
+
+<body>
+    <canvas id="view"></canvas>
+
+    <div id="hud" aria-live="off">
+        <strong id="scene-name">Raymond</strong><span id="stats">Starting…</span>
+        <div id="progress"><div></div></div>
+    </div>
+
+    <div id="toolbar">
+        <button id="play" type="button" aria-label="Pause" title="Pause">
+            <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="3" width="4" height="14" /><rect x="12" y="3" width="4" height="14" /></svg>
+        </button>
+        <button id="home" type="button" aria-label="Reset view" title="Reset view">
+            <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"><path d="M11 3 2 11h3v8h5v-5h2v5h5v-8h3z" /></svg>
+        </button>
+        <button id="save" type="button" aria-label="Save image" title="Save image">
+            <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"><path d="M10 3h2v9l3-3 1.4 1.4L11 15.8 5.6 10.4 7 9l3 3zM4 17h14v2H4z" /></svg>
+        </button>
+        <button id="settings-button" type="button" aria-label="Settings" title="Settings" aria-expanded="false" aria-controls="settings">
+            <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13a7.5 7.5 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.6 7.6 0 0 0-1.7-1L15 3.3h-4L10.7 6a7.6 7.6 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.5 7.5 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a7.6 7.6 0 0 0 1.7 1l.3 2.6h4l.3-2.6a7.6 7.6 0 0 0 1.7-1l2.5 1 2-3.5zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z" transform="translate(-1 0)" /></svg>
+        </button>
+    </div>
+
+    <aside id="settings" aria-label="Settings">
+        <header>
+            <h2>Raymond</h2>
+            <button id="settings-close" type="button" aria-label="Close settings">✕</button>
+        </header>
+
+        <label>Scene <select id="scene"></select></label>
+        <label>View <select id="view-mode"></select></label>
+
+        <label>Bounces <output id="bounces-value"></output>
+            <input id="bounces" type="range" step="1">
+        </label>
+        <p class="note">How many times light may bounce on its way to the camera. Glass needs plenty.</p>
+
+        <label>Aperture <output id="aperture-value"></output>
+            <input id="aperture" type="range" min="0" max="1" step="0.01">
+        </label>
+        <p class="note">Blurs what's out of focus. Tap the image to focus there.</p>
+
+        <label>Exposure <output id="exposure-value"></output>
+            <input id="exposure" type="range" step="0.25">
+        </label>
+
+        <label>Resolution <select id="resolution"></select></label>
+
+        <label>Samples per frame <output id="samples-per-frame-value"></output>
+            <input id="samples-per-frame" type="range" step="1">
+        </label>
+        <p class="note">More clears the image faster, but makes moving the camera less smooth.</p>
+
+        <label>Stop after <select id="sample-limit"></select></label>
+
+        <label class="check"><input id="tame-fireflies" type="checkbox"> Tame fireflies</label>
+        <p class="note">Dims the rare very bright specks that take ages to average out, at a small cost in accuracy.</p>
+
+        <label>Theme <select id="theme"></select></label>
+
+        <div class="help">
+            <p class="note">Drag to orbit, pinch or scroll to zoom, two fingers or right-drag to pan,
+                tap to focus, double-tap to go back.</p>
+            <p class="note"><a href="https://github.com/StefanSkrobanski/Raymond">Source on GitHub</a></p>
+        </div>
+    </aside>
+
+    <div id="toast" role="status"></div>
+
+    <div id="error" hidden>
+        <div>
+            <h1></h1>
+            <pre></pre>
+            <p>Raymond needs WebGPU: a recent Chrome or Edge, Safari 26, or Firefox 141 on Windows.</p>
+        </div>
+    </div>
+</body>
+
+</html>
