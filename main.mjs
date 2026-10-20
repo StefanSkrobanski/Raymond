@@ -172,6 +172,7 @@ function applySettings() {
     renderer.samplesPerFrame = settings.samples_per_frame;
     renderer.exposure = 2.0 ** settings.exposure;
     renderer.fireflyClamp = settings.tame_fireflies ? 10.0 : 0.0;
+    renderer.denoise = settings.denoise;
     camera.aperture = aperture * APERTURE_SCALE * camera.effectiveFocusDistance;
 
     $("bounces").value = settings.bounces;
@@ -182,6 +183,7 @@ function applySettings() {
     $("exposure-value").textContent = `${settings.exposure > 0 ? "+" : ""}${settings.exposure.toFixed(2)} EV`;
     $("aperture-value").textContent = aperture > 0 ? aperture.toFixed(2) : "Pinhole";
     $("tame-fireflies").checked = settings.tame_fireflies;
+    $("denoise").checked = settings.denoise;
 
     saveSettings(settings);
     applyTheme();
@@ -239,6 +241,11 @@ bindSlider("aperture", { min: 0, max: 1 }, (v) => aperture = v);
 
 $("tame-fireflies").addEventListener("change", () => {
     settings.tame_fireflies = $("tame-fireflies").checked;
+    applySettings();
+});
+
+$("denoise").addEventListener("change", () => {
+    settings.denoise = $("denoise").checked;
     applySettings();
 });
 

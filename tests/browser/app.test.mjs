@@ -270,6 +270,69 @@ for (const material of ["diffuse", "plastic", "metal"]) {
     });
 }
 
+// ---- The denoiser ----
+
+// The root mean square difference between two images' RGB.
+function rmse(a, b) {
+    let sum = 0;
+    for (let i = 0; i < a.length; i += 4)
+        for (let c = 0; c < 3; ++c)
+            sum += (a[i + c] - b[i + c]) ** 2;
+    return Math.sqrt(sum / (a.length / 4 * 3));
+}
+
+// The converged image of the room, rendered once.
+let room_reference;
+
+async function roomReference(size) {
+    room_reference ??= await trace("room", { spp: 1024, size, bounces: 4 });
+    return room_reference;
+}
+
+test("denoising brings a few samples much closer to the converged image", async () => {
+
+    const size = 96;
+    const reference = await roomReference(size);
+
+    for (const [spp, factor] of [[1, 0.5], [4, 0.7]]) {
+
+        const noisy = await trace("room", { spp, size, bounces: 4, denoise: true });
+        const before = rmse(noisy.pixels, reference.pixels);
+        const after = rmse(noisy.denoised, reference.pixels);
+
+        assert.ok(noisy.denoised.every(Number.isFinite), "no NaNs");
+        assert.ok(after < before * factor, `${spp} spp: error ${before.toFixed(4)} noisy, ${after.toFixed(4)} denoised`);
+    }
+});
+
+test("denoising keeps the checkerboard's edges", async () => {
+
+    const size = 96;
+    const reference = await roomReference(size);
+    const noisy = await trace("room", { spp: 4, size, bounces: 4, denoise: true });
+
+    // On the checkered floor, blurring the squares together would put the
+    // denoised image further from the converged one than the noise was.
+    const floor = interior(reference.hits, size, 0);
+    const error = (pixels) => Math.sqrt(mean(floor.map((i) =>
+        mean([0, 1, 2].map((c) => (pixels[i * 4 + c] - reference.pixels[i * 4 + c]) ** 2)))));
+
+    assert.ok(floor.length > 1000);
+    assert.ok(error(noisy.denoised) < error(noisy.pixels),
+        `floor error ${error(noisy.pixels).toFixed(4)} noisy, ${error(noisy.denoised).toFixed(4)} denoised`);
+});
+
+test("as the samples build up, the denoised image becomes the average", async () => {
+
+    const size = 32;
+    const { pixels, denoised } = await trace("room", { spp: 512, size, bounces: 4, denoise: true });
+
+    const difference = rmse(pixels, denoised);
+    const brightness = Math.sqrt(pixels.reduce((s, v, i) => s + (i % 4 == 3 ? 0 : v * v), 0) / (pixels.length * 0.75));
+
+    assert.ok(difference < 0.05 * brightness, `difference ${difference.toFixed(4)} against brightness ${brightness.toFixed(4)}`);
+});
+
 test("the Cornell box renders with colour bleeding and no NaNs", async () => {
 
     const { page, errors, context } = await open("index.html");
@@ -375,6 +438,24 @@ test("the settings panel changes the scene, view and resolution, and remembers t
     assert.equal(await page.inputValue("#view-mode"), "normal");
 
     assert.deepEqual(errors, []);
+    await context.close();
+});
+
+test("turning denoising off and on doesn't start the image again", async () => {
+
+    const { page, context } = await open("index.html");
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 3, null, { timeout: 60000 });
+
+    await page.click("#settings-button");
+    const before = await page.evaluate(() => window.raymond.renderer.samples);
+    await page.uncheck("#denoise");
+    await page.waitForFunction(() => window.raymond.renderer.denoise == false);
+    await page.waitForTimeout(500);
+
+    assert.ok(await page.evaluate(() => window.raymond.renderer.samples) >= before, "the samples carried on");
+    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("raymond-settings")));
+    assert.equal(stored.denoise, false);
+
     await context.close();
 });
 

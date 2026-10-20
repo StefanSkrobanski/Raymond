@@ -26,11 +26,13 @@ const renderer: Renderer = await Renderer.create(canvas);
 renderer.scene = scene;
 renderer.camera = camera;
 renderer.maxBounces = 12;
+renderer.denoise = true;
 
 const view: View = "normal";
 renderer.view = view;
 
 const pixels: Float32Array = await renderer.readPixels();
+const denoised: Float32Array = await renderer.readPixels({ denoised: true });
 const hit = scene.raycast(camera.position, camera.target.subtract(camera.position));
 const distance: number | undefined = hit?.distance;
 
@@ -40,7 +42,12 @@ renderer.view = "wireframe";
 // @ts-expect-error: a sphere needs a material
 new Sphere(new Vec3(0, 0, 0), 1);
 
+// @ts-expect-error: a lathe's profile is Vec2s
+Mesh.lathe([new Vec3(0, 0, 0)], Material.diffuse(new Vec3(1, 1, 1)));
+
+const stick: Box = Box.between(new Vec3(0, 0, 0), new Vec3(0, 1, 0), 0.1, Material.metal(new Vec3(1, 1, 1)));
+
 // @ts-expect-error: colours are Vec3s
 Material.diffuse("#ff0000");
 
-export { pixels, distance };
+export { pixels, denoised, distance, stick };

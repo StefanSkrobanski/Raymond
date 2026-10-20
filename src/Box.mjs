@@ -44,6 +44,37 @@ export class Box {
         return new Box(transform, material);
     }
 
+    /**
+     * A square-sectioned stick from a to b, thickness across, such as a
+     * rod, a string or a beam.
+     * @param {Vec3} a
+     * @param {Vec3} b
+     * @param {number} thickness
+     * @param {Material} material
+     */
+    static between(a, b, thickness, material) {
+
+        const center = a.add(b).scale(0.5);
+        const along = b.subtract(a);
+        const half_length = along.length() / 2.0;
+
+        if (!(half_length > 0.0))
+            throw new RangeError("A stick's ends must differ.");
+
+        // Any two directions across the stick, at right angles.
+        const z = along.normalized();
+        const helper = Math.abs(z.y) < 0.9 ? new Vec3(0, 1, 0) : new Vec3(1, 0, 0);
+        const x = helper.cross(z).normalized();
+        const y = z.cross(x);
+        const t = thickness / 2.0;
+
+        return new Box(new Mat4(
+            x.x * t, y.x * t, z.x * half_length, center.x,
+            x.y * t, y.y * t, z.y * half_length, center.y,
+            x.z * t, y.z * t, z.z * half_length, center.z,
+            0.0, 0.0, 0.0, 1.0), material);
+    }
+
     get transform() {
         return this.#transform;
     }
