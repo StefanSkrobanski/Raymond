@@ -496,7 +496,9 @@ test("the example page renders with the library by its package name", async () =
     const { page, errors, context } = await open("examples/basic.html", { viewport: { width: 640, height: 480 } });
 
     await page.waitForTimeout(3000);
-    const shot = decodePng(await page.screenshot());
+    // A screenshot waits for the frame being drawn, which at 640 × 480 on
+    // SwiftShader can take a while on a slow machine.
+    const shot = decodePng(await page.screenshot({ timeout: 60000 }));
     const sky = shot.pixel(320, 20);
     assert.ok(sky[2] > 100, `the sky is blue: ${sky}`);
 

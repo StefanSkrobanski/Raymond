@@ -38,8 +38,9 @@ const renderer = await Renderer.create(document.querySelector("canvas"));
 renderer.scene = scene;
 renderer.camera = new Camera({ position: new Vec3(0, 1.5, 4), target: new Vec3(0, 0.4, 0) });
 
-function frame() {
+async function frame() {
     renderer.render();             // adds renderer.samplesPerFrame paths per pixel
+    await renderer.device.queue.onSubmittedWorkDone();   // don't outrun the GPU
     if (renderer.samples < 512)
         requestAnimationFrame(frame);
 }
