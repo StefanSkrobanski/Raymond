@@ -337,6 +337,12 @@
             showError("Something went wrong", String(e.reason && e.reason.message || e.reason));
         });
     </script>
+    <script>
+        // A service worker that always asks the server for the latest files
+        // (sw.js), so an update is never mixed with stale cached modules.
+        if ("serviceWorker" in navigator)
+            navigator.serviceWorker.register("sw.js").catch(() => {});
+    </script>
     <script type="module" src="main.mjs"></script>
 </head>
 

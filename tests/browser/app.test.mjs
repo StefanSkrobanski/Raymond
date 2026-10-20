@@ -59,10 +59,12 @@ after(async () => {
     server?.close();
 });
 
-// Opens a page, collecting its errors (missing favicons aside).
-async function open(path, { viewport = { width: 480, height: 320 } } = {}) {
+// Opens a page, collecting its errors (missing favicons aside). Service
+// workers are blocked unless asked for, so cached copies never stand in
+// for the files under test.
+async function open(path, { viewport = { width: 480, height: 320 }, serviceWorkers = false } = {}) {
 
-    const context = await browser.newContext({ viewport, reducedMotion: "reduce" });
+    const context = await browser.newContext({ viewport, reducedMotion: "reduce", serviceWorkers: serviceWorkers ? "allow" : "block" });
     const page = await context.newPage();
     const errors = [];
 
@@ -502,6 +504,19 @@ test("the example page renders with the library by its package name", async () =
     const sky = shot.pixel(320, 20);
     assert.ok(sky[2] > 100, `the sky is blue: ${sky}`);
 
+    assert.deepEqual(errors, []);
+    await context.close();
+});
+
+test("the service worker registers and takes control", async () => {
+
+    const { page, errors, context } = await open("index.html", { serviceWorkers: true });
+
+    await page.evaluate(() => navigator.serviceWorker.ready);
+    await page.reload();
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: 60000 });
+
+    assert.equal(await page.evaluate(() => navigator.serviceWorker.controller !== null), true);
     assert.deepEqual(errors, []);
     await context.close();
 });
