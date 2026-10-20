@@ -3,10 +3,22 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- viewport-fit=cover lets the image run under the notch and home
+         indicator; the panels keep clear of them with env(safe-area-inset-*). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Raymond</title>
     <meta name="description" content="A progressive path tracer for WebGPU, in plain JavaScript.">
-    <meta name="theme-color" content="#0b0d12">
+    <meta name="theme-color" content="#000000">
+
+    <!-- Added to an iPhone or iPad home screen, open full screen, with the
+         icon Raymond rendered of itself (tools/render-icons.mjs). -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Raymond">
+    <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="icon-180.png">
+    <link rel="icon" type="image/png" href="icon-192.png">
 
     <script>
         // Apply the theme before the first paint, so dark mode never flashes
