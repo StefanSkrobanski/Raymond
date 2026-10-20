@@ -1,0 +1,13 @@
+{
+    // Checks that a TypeScript project importing the package by name gets
+    // the generated declarations (npm run test:types).
+    "compilerOptions": {
+        "noEmit": true,
+        "strict": true,
+        "target": "es2022",
+        "module": "nodenext",
+        "moduleResolution": "nodenext",
+        "lib": ["es2022", "dom"]
+    },
+    "include": ["usage.mts"]
+}

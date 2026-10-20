@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raymond: a basic example</title>
+    <style>
+        body { margin: 0; background: #000; }
+        canvas { display: block; width: 100vw; height: 100vh; }
+    </style>
+
+    <!-- Maps the package name to the library, as a bundler would after
+         npm install @stefanskrobanski/raymond. -->
+    <script type="importmap">
+        { "imports": { "@stefanskrobanski/raymond": "../src/index.mjs" } }
+    </script>
+</head>
+
+<body>
+    <canvas id="canvas" width="640" height="480"></canvas>
+
+    <script type="module">
+        import { Camera, Material, Quad, Renderer, Scene, Sky, Sphere, Vec3 } from "@stefanskrobanski/raymond";
+
+        // A glass ball and a gold one on a floor, under a sky with a sun.
+        const scene = new Scene({ sky: new Sky({ sunStrength: 3.0 }) });
+
+        scene.add(
+            new Quad(new Vec3(-10, 0, 10), new Vec3(20, 0, 0), new Vec3(0, 0, -20),
+                Material.checkered(new Vec3(0.8, 0.8, 0.8), new Vec3(0.2, 0.2, 0.2), 0.5)),
+            new Sphere(new Vec3(-0.6, 0.5, 0), 0.5, Material.glass(1.5)),
+            new Sphere(new Vec3(0.6, 0.5, 0), 0.5, Material.metal(new Vec3(1.0, 0.78, 0.34), 0.2)));
+
+        const camera = new Camera({ position: new Vec3(0, 1.5, 4), target: new Vec3(0, 0.4, 0) });
+
+        const renderer = await Renderer.create(document.getElementById("canvas"));
+        renderer.scene = scene;
+        renderer.camera = camera;
+
+        // Keep adding samples until the image has cleared up.
+        function frame() {
+            renderer.render();
+            if (renderer.samples < 512)
+                requestAnimationFrame(frame);
+        }
+
+        frame();
+    </script>
+</body>
+
+</html>

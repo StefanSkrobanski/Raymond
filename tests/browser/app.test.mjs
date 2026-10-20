@@ -1,0 +1,487 @@
+// Drives the library and the app in headless Chromium, on WebGPU emulated
+// by SwiftShader. Checks the GPU against the CPU raycast and against exact
+// answers for simple lighting, then the app's controls, the example page
+// and the error shown without WebGPU.
+
+import { test, before, after } from "node:test";
+import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { readFile } from "node:fs/promises";
+import { extname, join, normalize } from "node:path";
+import { fileURLToPath } from "node:url";
+import { inflateSync } from "node:zlib";
+import { chromium } from "playwright";
+
+const ROOT = fileURLToPath(new URL("../../", import.meta.url));
+
+const TYPES = {
+    ".html": "text/html", ".mjs": "text/javascript", ".js": "text/javascript",
+    ".json": "application/json", ".png": "image/png",
+};
+
+// Headless Chromium only presents WebGPU canvases with Vulkan and ANGLE on
+// SwiftShader, in the new headless mode (the "chromium" channel).
+const GPU_LAUNCH = {
+    channel: "chromium",
+    args: ["--enable-unsafe-webgpu", "--enable-features=Vulkan", "--use-vulkan=swiftshader", "--use-angle=swiftshader"],
+};
+
+let server;
+let browser;
+let base_url;
+
+before(async () => {
+
+    // A minimal static file server for the repository.
+    server = createServer(async (request, response) => {
+        let path = normalize(decodeURIComponent(new URL(request.url, "http://x").pathname));
+        if (path.endsWith("/"))
+            path += "index.html";
+        try {
+            const body = await readFile(join(ROOT, path));
+            response.writeHead(200, { "Content-Type": TYPES[extname(path)] ?? "application/octet-stream" });
+            response.end(body);
+        }
+        catch {
+            response.writeHead(404);
+            response.end();
+        }
+    });
+
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    base_url = `http://127.0.0.1:${server.address().port}/`;
+
+    browser = await chromium.launch(GPU_LAUNCH);
+});
+
+after(async () => {
+    await browser?.close();
+    server?.close();
+});
+
+// Opens a page, collecting its errors (missing favicons aside).
+async function open(path, { viewport = { width: 480, height: 320 } } = {}) {
+
+    const context = await browser.newContext({ viewport, reducedMotion: "reduce" });
+    const page = await context.newPage();
+    const errors = [];
+
+    page.on("pageerror", (e) => errors.push(e.message));
+    page.on("console", (m) => {
+        if (m.type() == "error" && !m.text().includes("404"))
+            errors.push(m.text());
+    });
+
+    await page.goto(base_url + path);
+    return { page, errors, context };
+}
+
+let fixture;
+
+async function trace(name, options) {
+
+    if (!fixture) {
+        fixture = (await open("tests/browser/fixture.html")).page;
+        await fixture.waitForFunction(() => window.ready);
+    }
+
+    return fixture.evaluate(([n, o]) => window.trace(n, o), [name, options]);
+}
+
+const rgb = (pixels, i) => [pixels[i * 4], pixels[i * 4 + 1], pixels[i * 4 + 2]];
+const mean = (values) => values.reduce((a, b) => a + b, 0) / values.length;
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const length = (a) => Math.sqrt(dot(a, a));
+
+// Pixels whose centre and four neighbours all see the same object, so
+// antialiasing doesn't blend it with another.
+function interior(hits, size, object = null) {
+
+    const keep = [];
+    for (let y = 1; y < size - 1; ++y) {
+        for (let x = 1; x < size - 1; ++x) {
+            const i = y * size + x;
+            const h = hits[i];
+            if (!h || (object !== null && h.object != object))
+                continue;
+            if ([i - 1, i + 1, i - size, i + size].every((j) => hits[j] && hits[j].object == h.object))
+                keep.push(i);
+        }
+    }
+    return keep;
+}
+
+// ---- The GPU against the CPU ----
+
+test("the GPU sees what the CPU raycast sees, through every pixel", async () => {
+
+    const size = 64;
+    const depth = await trace("mixed", { view: "depth", spp: 1, size });
+    const normal = await trace("mixed", { view: "normal", spp: 1, size });
+
+    let compared = 0;
+    let wrong = 0;
+
+    for (let i = 0; i < size * size; ++i) {
+
+        const hit = depth.hits[i];
+        const gpu_depth = depth.pixels[i * 4];
+
+        if (!hit) {
+            if (gpu_depth != 0)
+                wrong++;
+            continue;
+        }
+
+        compared++;
+        const gpu_normal = rgb(normal.pixels, i);
+        if (Math.abs(gpu_depth - hit.distance) > 1e-3 * hit.distance || dot(gpu_normal, hit.normal) < 0.999)
+            wrong++;
+    }
+
+    assert.ok(compared > size * size * 0.5, "most pixels see something");
+    // A few pixels on silhouettes may round differently.
+    assert.ok(wrong <= size * size * 0.005, `${wrong} pixels disagree`);
+});
+
+test("the albedo view shows each surface's colour", async () => {
+
+    const size = 48;
+    const { pixels, hits } = await trace("mixed", { view: "albedo", spp: 1, size });
+
+    // The sphere (object 1) is red, the floor (object 0) grey.
+    for (const i of interior(hits, size, 1))
+        assert.deepEqual(rgb(pixels, i).map((c) => +c.toFixed(3)), [1, 0, 0]);
+    for (const i of interior(hits, size, 0))
+        assert.deepEqual(rgb(pixels, i).map((c) => +c.toFixed(3)), [0.5, 0.5, 0.5]);
+});
+
+// ---- Light, against exact answers ----
+
+test("a white furnace: a diffuse ball reflects exactly its albedo", async () => {
+
+    const size = 32;
+    const { pixels, hits } = await trace("furnaceDiffuse", { spp: 64, size });
+
+    const ball = interior(hits, size, 0).map((i) => mean(rgb(pixels, i)));
+    // Sky pixels clear of the ball's edge, which antialiasing blends in.
+    const sky = hits.map((h, i) => [i, i - 1, i + 1, i - size, i + size].every((j) => j >= 0 && j < hits.length && !hits[j]) ? mean(rgb(pixels, i)) : null)
+        .filter((v) => v !== null);
+
+    assert.ok(Math.abs(mean(ball) - 0.8) < 0.01, `ball ${mean(ball)}`);
+    assert.ok(Math.abs(mean(sky) - 1.0) < 1e-4, `sky ${mean(sky)}`);
+});
+
+test("a white furnace: clear glass neither gains nor loses light", async () => {
+
+    const size = 32;
+    const { pixels, hits } = await trace("furnaceGlass", { spp: 128, size, bounces: 32 });
+
+    const ball = interior(hits, size, 0).map((i) => mean(rgb(pixels, i)));
+
+    assert.ok(Math.abs(mean(ball) - 1.0) < 0.015, `ball ${mean(ball)}`);
+});
+
+// The brightness of the floor (albedo 0.5) at each pixel, against the
+// exact value from irradiance(point), averaged over the floor.
+function assertFloorMatches(result, size, irradiance, tolerance) {
+
+    const ratios = [];
+    for (const i of interior(result.hits, size, 0)) {
+        const expected = 0.5 / Math.PI * irradiance(result.hits[i].point);
+        if (expected > 0.02)
+            ratios.push(result.pixels[i * 4] / expected);
+    }
+
+    assert.ok(ratios.length > 200, `${ratios.length} floor pixels`);
+    const average = mean(ratios);
+    assert.ok(Math.abs(average - 1.0) < tolerance, `rendered / exact = ${average}`);
+}
+
+test("direct light from a sphere matches the exact answer", async () => {
+
+    const size = 48;
+    const result = await trace("sphereLight", { spp: 64, size, bounces: 1 });
+
+    // A sphere wholly above the horizon gives E = pi L (r / d)^2 cos(theta).
+    const centre = [0.5, 1.5, -1], radius = 0.5, emission = 6.0;
+
+    assertFloorMatches(result, size, (p) => {
+        const to = sub(centre, p);
+        const d = length(to);
+        const cos_theta = to[1] / d;
+        return cos_theta < radius / d ? 0 : Math.PI * emission * (radius / d) ** 2 * cos_theta;
+    }, 0.015);
+});
+
+test("direct light from a quad matches the exact answer", async () => {
+
+    const size = 48;
+    const result = await trace("quadLight", { spp: 128, size, bounces: 1 });
+
+    // Lambert's formula for a polygon: E = L/2 sum over edges of the angle
+    // each edge subtends times the cosine of its plane's normal with up.
+    const corners = [[-0.5, 1.5, -1.5], [0.7, 1.5, -1.5], [0.7, 1.5, -0.7], [-0.5, 1.5, -0.7]];
+    const emission = 6.0;
+
+    assertFloorMatches(result, size, (p) => {
+        let sum = 0;
+        for (let k = 0; k < 4; ++k) {
+            const a = sub(corners[k], p), b = sub(corners[(k + 1) % 4], p);
+            const c = cross(a, b);
+            const angle = Math.acos(dot(a, b) / (length(a) * length(b)));
+            sum += angle * c[1] / length(c);
+        }
+        return emission / 2 * Math.abs(sum);
+    }, 0.015);
+});
+
+test("light from an overhead sun matches the exact answer", async () => {
+
+    const size = 32;
+    const result = await trace("sun", { spp: 16, size, bounces: 1 });
+
+    // The disc's radiance times its projected solid angle.
+    const size_angle = 0.05;
+    const irradiance = 2.0 * (1 + Math.cos(size_angle)) / 2;
+
+    assertFloorMatches(result, size, () => irradiance, 0.005);
+});
+
+for (const material of ["diffuse", "plastic", "metal"]) {
+
+    test(`sampling a light directly agrees with finding it by bouncing, on ${material}`, async () => {
+
+        // The sphere is sampled as a light, combining both strategies by
+        // multiple importance sampling; the mesh can only be found by
+        // bouncing. Wrong weights would make them differ.
+        const size = 32;
+        const direct = await trace("lightAsSphere", { arg: material, spp: 256, size, bounces: 1 });
+        const bounced = await trace("lightAsMesh", { arg: material, spp: 1024, size, bounces: 1 });
+
+        const floor = interior(direct.hits, size, 0).filter((i) => bounced.hits[i]?.object == 0);
+        const a = mean(floor.map((i) => mean(rgb(direct.pixels, i))));
+        const b = mean(floor.map((i) => mean(rgb(bounced.pixels, i))));
+
+        assert.ok(floor.length > 200);
+        assert.ok(Math.abs(a / b - 1.0) < 0.03, `direct ${a}, bounced ${b}`);
+    });
+}
+
+test("the Cornell box renders with colour bleeding and no NaNs", async () => {
+
+    const { page, errors, context } = await open("index.html");
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 16, null, { timeout: 120000 });
+
+    const pixels = await page.evaluate(async () => Array.from(await window.raymond.renderer.readPixels()));
+    const width = await page.evaluate(() => window.raymond.renderer.canvas.width);
+    const height = pixels.length / 4 / width;
+
+    assert.ok(pixels.every(Number.isFinite), "no NaNs or infinities");
+
+    // Average a block of pixels at a fraction (fx, fy) across the image.
+    const block = (fx, fy) => {
+        const cx = Math.floor(fx * width), cy = Math.floor(fy * height);
+        const sums = [0, 0, 0];
+        for (let y = cy - 3; y <= cy + 3; ++y)
+            for (let x = cx - 3; x <= cx + 3; ++x)
+                for (let c = 0; c < 3; ++c)
+                    sums[c] += pixels[(y * width + x) * 4 + c] / 49;
+        return sums;
+    };
+
+    // At 480 x 320, the room spans about the middle two thirds.
+    const left = block(0.21, 0.5);
+    const right = block(0.79, 0.5);
+    const ceiling = block(0.5, 0.03);
+
+    assert.ok(left[0] > 2 * left[1], `left wall is red: ${left}`);
+    assert.ok(right[1] > 2 * right[0], `right wall is green: ${right}`);
+    assert.ok(mean(ceiling) > 0.02, "the ceiling is lit by the floor");
+
+    assert.deepEqual(errors, []);
+    await context.close();
+});
+
+// ---- The app ----
+
+test("the app accumulates samples and reports them", async () => {
+
+    const { page, errors, context } = await open("index.html");
+
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 4, null, { timeout: 60000 });
+
+    assert.equal(await page.isHidden("#error"), true);
+    assert.match(await page.textContent("#stats"), /^\d+ \/ 4096 samples · 480×320/);
+    assert.equal(await page.textContent("#scene-name"), "Cornell box");
+
+    // The image is on screen, and isn't black.
+    const shot = decodePng(await page.screenshot());
+    const centre = shot.pixel(240, 200);
+    assert.ok(centre[0] + centre[1] + centre[2] > 60, `centre pixel ${centre}`);
+
+    assert.deepEqual(errors, []);
+    await context.close();
+});
+
+test("pausing stops the samples, and a camera move still redraws", async () => {
+
+    const { page, context } = await open("index.html");
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 2, null, { timeout: 60000 });
+
+    await page.click("#play");
+    await page.waitForTimeout(500);
+    const paused = await page.evaluate(() => window.raymond.renderer.samples);
+    await page.waitForTimeout(1000);
+    assert.equal(await page.evaluate(() => window.raymond.renderer.samples), paused, "no new samples");
+    assert.match(await page.textContent("#stats"), /paused/);
+
+    // Dragging moves the camera, which starts the image again with one frame.
+    const before = await page.evaluate(() => window.raymond.camera.position.x);
+    await page.mouse.move(240, 160);
+    await page.mouse.down();
+    await page.mouse.move(300, 160, { steps: 4 });
+    await page.mouse.up();
+    await page.waitForFunction(() => window.raymond.renderer.samples == 1, null, { timeout: 30000 });
+    assert.notEqual(await page.evaluate(() => window.raymond.camera.position.x), before);
+
+    await context.close();
+});
+
+test("the settings panel changes the scene, view and resolution, and remembers them", async () => {
+
+    const { page, errors, context } = await open("index.html");
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: 60000 });
+
+    await page.click("#settings-button");
+    await page.selectOption("#scene", "spheres");
+    await page.waitForFunction(() => document.getElementById("scene-name").textContent == "Sphere field");
+
+    await page.selectOption("#view-mode", "normal");
+    await page.selectOption("#resolution", "0.5");
+    await page.waitForFunction(() => window.raymond.renderer.view == "normal" && window.raymond.renderer.canvas.width == 240);
+
+    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("raymond-settings")));
+    assert.equal(stored.scene, "spheres");
+    assert.equal(stored.view, "normal");
+    assert.equal(stored.resolution, 0.5);
+
+    // Reloading keeps them.
+    await page.reload();
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: 60000 });
+    assert.equal(await page.textContent("#scene-name"), "Sphere field");
+    assert.equal(await page.inputValue("#view-mode"), "normal");
+
+    assert.deepEqual(errors, []);
+    await context.close();
+});
+
+test("tapping the image focuses there", async () => {
+
+    const { page, context } = await open("index.html");
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: 60000 });
+
+    // The middle of the Cornell box's back wall, about 4.85 away along
+    // the view direction (the camera is at z = 3.85, the wall at z = -1).
+    await page.mouse.click(240, 110);
+    await page.waitForSelector("#toast.show");
+
+    const focus = await page.evaluate(() => window.raymond.camera.focusDistance);
+    assert.ok(Math.abs(focus - 4.85) < 0.05, `focus ${focus}`);
+
+    await context.close();
+});
+
+test("the save button downloads the image as a PNG", async () => {
+
+    const { page, context } = await open("index.html");
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: 60000 });
+
+    const [download] = await Promise.all([page.waitForEvent("download"), page.click("#save")]);
+    assert.match(download.suggestedFilename(), /^raymond-cornell-\d+spp\.png$/);
+
+    const image = decodePng(await readFile(await download.path()));
+    assert.equal(image.width, 480);
+    const centre = image.pixel(240, 200);
+    assert.ok(centre[0] + centre[1] + centre[2] > 60, `the saved image isn't black: ${centre}`);
+
+    await context.close();
+});
+
+test("the example page renders with the library by its package name", async () => {
+
+    const { page, errors, context } = await open("examples/basic.html", { viewport: { width: 640, height: 480 } });
+
+    await page.waitForTimeout(3000);
+    const shot = decodePng(await page.screenshot());
+    const sky = shot.pixel(320, 20);
+    assert.ok(sky[2] > 100, `the sky is blue: ${sky}`);
+
+    assert.deepEqual(errors, []);
+    await context.close();
+});
+
+test("without WebGPU, the page explains instead of going blank", async () => {
+
+    // The headless shell has no WebGPU adapter without the flags.
+    const plain = await chromium.launch();
+    const page = await plain.newPage();
+    await page.goto(base_url + "index.html");
+
+    await page.waitForSelector("#error:not([hidden])");
+    assert.match(await page.textContent("#error h1"), /WebGPU/);
+
+    await plain.close();
+});
+
+// Decodes an 8-bit RGB or RGBA PNG, as Chromium writes them, enough to
+// read pixels from screenshots.
+function decodePng(buffer) {
+
+    const width = buffer.readUInt32BE(16);
+    const height = buffer.readUInt32BE(20);
+    const color_type = buffer[25];
+    const channels = color_type == 6 ? 4 : 3;
+    assert.equal(buffer[24], 8, "8 bits per channel");
+
+    const chunks = [];
+    for (let offset = 8; offset < buffer.length;) {
+        const size = buffer.readUInt32BE(offset);
+        const type = buffer.toString("ascii", offset + 4, offset + 8);
+        if (type == "IDAT")
+            chunks.push(buffer.subarray(offset + 8, offset + 8 + size));
+        offset += size + 12;
+    }
+
+    const raw = inflateSync(Buffer.concat(chunks));
+    const stride = width * channels;
+    const out = Buffer.alloc(height * stride);
+
+    for (let y = 0; y < height; ++y) {
+        const filter = raw[y * (stride + 1)];
+        for (let x = 0; x < stride; ++x) {
+            const value = raw[y * (stride + 1) + 1 + x];
+            const a = x >= channels ? out[y * stride + x - channels] : 0;
+            const b = y > 0 ? out[(y - 1) * stride + x] : 0;
+            const c = x >= channels && y > 0 ? out[(y - 1) * stride + x - channels] : 0;
+            let predicted = 0;
+            if (filter == 1) predicted = a;
+            else if (filter == 2) predicted = b;
+            else if (filter == 3) predicted = (a + b) >> 1;
+            else if (filter == 4) {
+                const p = a + b - c;
+                const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+                predicted = pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+            }
+            out[y * stride + x] = (value + predicted) & 255;
+        }
+    }
+
+    return {
+        width,
+        height,
+        pixel: (x, y) => [...out.subarray(y * stride + x * channels, y * stride + x * channels + 3)],
+    };
+}
