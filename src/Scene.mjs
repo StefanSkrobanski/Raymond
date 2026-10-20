@@ -5,8 +5,10 @@ import { Mesh } from "./Mesh.mjs";
 import { Quad } from "./Quad.mjs";
 import { Sky } from "./Sky.mjs";
 import { Sphere } from "./Sphere.mjs";
+import { Vec2 } from "./Vec2.mjs";
 import { Vec3 } from "./Vec3.mjs";
 /** @import { Material } from "./Material.mjs" */
+/** @import { Texture } from "./Texture.mjs" */
 
 /** @typedef {Sphere | Quad | Box | Mesh} SceneObject */
 
@@ -14,19 +16,25 @@ import { Vec3 } from "./Vec3.mjs";
  * A scene packed into the buffers the shader reads. Primitives (a sphere,
  * quad, box or single triangle each) are 64 bytes, in the BVH's leaf order:
  *
- *     u32 kind, u32 material, u32 light, u32 normals,
+ *     u32 kind, u32 material, u32 light, u32 attributes,
  *     vec4 p0, vec4 p1, vec4 p2
  *
  * kind is a PRIMITIVE_KINDS code. light is the primitive's index in lights,
  * if it's a light the renderer samples directly (an emissive sphere or
- * quad), and normals the index in normals of its first vertex normal (a
- * smooth triangle), or NONE otherwise. p0..p2 hold a sphere's centre and
- * radius (in p0.w); a quad's corner, u and v; a box's world-to-box matrix,
- * row by row; or a triangle's vertices.
+ * quad), and attributes the index in attributes of its block (a triangle
+ * with vertex normals or texture coordinates), or NONE otherwise. p0..p2
+ * hold a sphere's centre and radius (in p0.w), its globe's x axis and its
+ * north pole (for textures); a quad's corner, u and v; a box's world-to-box
+ * matrix, row by row; or a triangle's vertices.
+ *
+ * A triangle's attribute block is 4 vec4s: each vertex's normal with its
+ * texture u in w, then the three vertices' texture v, and 1 in w if the
+ * normals are there (smooth) or 0 if only the texture coordinates are.
  *
  * Materials are 64 bytes: vec3 color, u32 type, vec3 emission, f32
- * roughness, vec3 checker, f32 checkerSize (0 for none), f32 ior, then 3
- * floats of padding.
+ * roughness, vec3 checker, f32 checkerSize (0 for none), f32 ior, u32
+ * texture (an index in textures, or NONE), then the texture's scale in u
+ * and v.
  * @typedef {object} PackedScene
  * @property {ArrayBuffer} primitives
  * @property {number} primitiveCount
@@ -34,7 +42,8 @@ import { Vec3 } from "./Vec3.mjs";
  * @property {number} nodeCount
  * @property {ArrayBuffer} materials
  * @property {number} materialCount
- * @property {Float32Array} normals vertex normals, 4 floats each
+ * @property {Float32Array} attributes triangles' attribute blocks, 16 floats each
+ * @property {Texture[]} textures in the order materials refer to them
  * @property {Uint32Array} lights the indices of primitives to sample as lights
  * @property {SceneObject[]} objects the object each primitive came from
  * @property {Material[]} materialList in the same order as materials
@@ -47,6 +56,8 @@ import { Vec3 } from "./Vec3.mjs";
  * @property {Vec3} point
  * @property {Vec3} normal unit length, facing back along the ray
  * @property {boolean} frontFace whether the ray hit the outside
+ * @property {Vec2} uv where it hit on the material's texture, before the
+ *   texture's scale
  * @property {SceneObject} object
  * @property {Material} material
  */
@@ -232,6 +243,7 @@ export class Scene {
 
         const point = origin.add(direction.scale(best_t));
         const { geometric, shading } = Scene.#normals(packed, floats, uints, best, point, best_u, best_v);
+        const uv = Scene.#uv(packed, floats, uints, best, point, best_u, best_v);
         const front_face = geometric.dot(direction) < 0.0;
         const facing = front_face ? shading : shading.negate();
 
@@ -240,6 +252,7 @@ export class Scene {
             point,
             normal: facing,
             frontFace: front_face,
+            uv,
             object: packed.objects[best],
             material: packed.materialList[uints[best * PRIMITIVE_FLOATS + 1]],
         };
@@ -272,12 +285,17 @@ export class Scene {
             return index;
         };
 
+        /** @type {Map<Texture, number>} */
+        const texture_index = new Map();
+        /** @type {Texture[]} */
+        const texture_list = [];
+
         // Each primitive, in object order: its packed record (with the
-        // normals index still to fix), its vertex normals, its bounds.
+        // attributes index still to fix), its attribute block, its bounds.
         /** @type {Float32Array[]} */
         const records = [];
-        /** @type {(Vec3[] | null)[]} */
-        const vertex_normals = [];
+        /** @type {(number[] | null)[]} */
+        const blocks = [];
         /** @type {SceneObject[]} */
         const owners = [];
         /** @type {number[]} */
@@ -289,9 +307,9 @@ export class Scene {
          * @param {Material} material
          * @param {number[]} p
          * @param {Vec3[]} points the primitive's extreme points, for its bounds
-         * @param {Vec3[] | null} [normals]
+         * @param {number[] | null} [block] a triangle's attribute block
          */
-        const addPrimitive = (owner, kind, material, p, points, normals = null) => {
+        const addPrimitive = (owner, kind, material, p, points, block = null) => {
 
             const record = new Float32Array(PRIMITIVE_FLOATS);
             const u = new Uint32Array(record.buffer);
@@ -302,7 +320,7 @@ export class Scene {
             record.set(p, 4);
 
             records.push(record);
-            vertex_normals.push(normals);
+            blocks.push(block);
             owners.push(owner);
 
             const min = [Infinity, Infinity, Infinity];
@@ -330,8 +348,9 @@ export class Scene {
 
             if (object instanceof Sphere) {
                 const c = object.center, r = object.radius;
+                const { x, north } = object.axes();
                 addPrimitive(object, PRIMITIVE_KINDS.sphere, object.material,
-                    [c.x, c.y, c.z, r],
+                    [c.x, c.y, c.z, r, x.x, x.y, x.z, 0.0, north.x, north.y, north.z, 0.0],
                     [c.subtract(new Vec3(r, r, r)), c.add(new Vec3(r, r, r))]);
             }
             else if (object instanceof Quad) {
@@ -347,14 +366,25 @@ export class Scene {
                     object.corners());
             }
             else {
-                const { positions, indices, normals } = object;
+                const { positions, indices, normals, uvs } = object;
                 for (let i = 0; i < indices.length; i += 3) {
                     const tri = [indices[i], indices[i + 1], indices[i + 2]];
                     const [a, b, c] = tri.map((k) => positions[k]);
+
+                    /** @type {number[] | null} */
+                    let block = null;
+                    if (normals || uvs) {
+                        block = [];
+                        for (const k of tri) {
+                            const n = normals ? normals[k] : new Vec3();
+                            block.push(n.x, n.y, n.z, uvs ? uvs[k].x : 0.0);
+                        }
+                        block.push(...tri.map((k) => uvs ? uvs[k].y : 0.0), normals ? 1.0 : 0.0);
+                    }
+
                     addPrimitive(object, PRIMITIVE_KINDS.triangle, object.material,
                         [a.x, a.y, a.z, 0.0, b.x, b.y, b.z, 0.0, c.x, c.y, c.z, 0.0],
-                        [a, b, c],
-                        normals ? tri.map((k) => normals[k]) : null);
+                        [a, b, c], block);
                 }
             }
         }
@@ -382,7 +412,7 @@ export class Scene {
         }
 
         /** @type {number[]} */
-        const normal_list = [];
+        const attribute_list = [];
         /** @type {number[]} */
         const light_list = [];
         /** @type {SceneObject[]} */
@@ -394,11 +424,10 @@ export class Scene {
             prim_floats.set(records[source], i * PRIMITIVE_FLOATS);
             packed_owners.push(owners[source]);
 
-            const normals = vertex_normals[source];
-            if (normals) {
-                prim_uints[i * PRIMITIVE_FLOATS + 3] = normal_list.length / 4;
-                for (const n of normals)
-                    normal_list.push(n.x, n.y, n.z, 0.0);
+            const block = blocks[source];
+            if (block) {
+                prim_uints[i * PRIMITIVE_FLOATS + 3] = attribute_list.length / 4;
+                attribute_list.push(...block);
             }
 
             const kind = prim_uints[i * PRIMITIVE_FLOATS];
@@ -421,6 +450,18 @@ export class Scene {
             if (m.checker)
                 mat_floats.set([m.checker.x, m.checker.y, m.checker.z, m.checkerSize], o + 8);
             mat_floats[o + 12] = m.ior;
+
+            mat_uints[o + 13] = NONE;
+            if (m.texture) {
+                let t = texture_index.get(m.texture);
+                if (t === undefined) {
+                    t = texture_list.length;
+                    texture_list.push(m.texture);
+                    texture_index.set(m.texture, t);
+                }
+                mat_uints[o + 13] = t;
+                mat_floats.set([m.textureScale.x, m.textureScale.y], o + 14);
+            }
         });
 
         return {
@@ -431,7 +472,8 @@ export class Scene {
             materials,
             materialCount: material_list.length,
             // At least one element each: WebGPU can't bind an empty buffer.
-            normals: new Float32Array(normal_list.length > 0 ? normal_list : [0, 0, 0, 0]),
+            attributes: new Float32Array(attribute_list.length > 0 ? attribute_list : [0, 0, 0, 0]),
+            textures: texture_list,
             lights: new Uint32Array(light_list.length > 0 ? light_list : [NONE]),
             objects: packed_owners,
             materialList: material_list,
@@ -619,13 +661,13 @@ export class Scene {
         const v0 = vec(4), v1 = vec(8), v2 = vec(12);
         const geometric = v1.subtract(v0).cross(v2.subtract(v0)).normalized();
 
-        const ni = u32[b + 3];
-        if (ni == NONE)
+        const ai = u32[b + 3];
+        const af = packed.attributes;
+        if (ai == NONE || af[(ai + 3) * 4 + 3] == 0.0)
             return { geometric, shading: geometric };
 
-        const nf = packed.normals;
         /** @param {number} k */
-        const normal = (k) => new Vec3(nf[(ni + k) * 4], nf[(ni + k) * 4 + 1], nf[(ni + k) * 4 + 2]);
+        const normal = (k) => new Vec3(af[(ai + k) * 4], af[(ai + k) * 4 + 1], af[(ai + k) * 4 + 2]);
 
         let shading = normal(0).scale(1.0 - bu - bv).add(normal(1).scale(bu)).add(normal(2).scale(bv)).normalized();
 
@@ -635,6 +677,87 @@ export class Scene {
 
         return { geometric, shading };
     }
+
+    // Where a hit falls on the texture, as the shader works it out: a
+    // sphere by latitude and longitude on its globe; a quad by how far
+    // along u and v (with v up, so a texture stands upright on a wall
+    // built with u right and v up); a box's face by distance from its top
+    // left corner, in world units, upright on the sides; a triangle by its
+    // vertices' coordinates, or failing those, its barycentric ones.
+    /**
+     * @param {PackedScene} packed
+     * @param {Float32Array} f
+     * @param {Uint32Array} u32
+     * @param {number} p
+     * @param {Vec3} point
+     * @param {number} bu
+     * @param {number} bv
+     */
+    static #uv(packed, f, u32, p, point, bu, bv) {
+
+        const b = p * PRIMITIVE_FLOATS;
+        const kind = u32[b];
+
+        /** @param {number} i */
+        const vec = (i) => new Vec3(f[b + i], f[b + i + 1], f[b + i + 2]);
+
+        if (kind == PRIMITIVE_KINDS.sphere)
+            return sphereUv(point.subtract(vec(4)).normalized(), vec(8), vec(12));
+
+        if (kind == PRIMITIVE_KINDS.quad)
+            return new Vec2(bu, 1.0 - bv);
+
+        if (kind == PRIMITIVE_KINDS.box) {
+            const lp = [0, 1, 2].map((r) => f[b + 4 + r * 4] * point.x + f[b + 5 + r * 4] * point.y + f[b + 6 + r * 4] * point.z + f[b + 7 + r * 4]);
+            const half = [0, 1, 2].map((r) => 1.0 / Math.hypot(f[b + 4 + r * 4], f[b + 5 + r * 4], f[b + 6 + r * 4]));
+            return boxUv(lp, half);
+        }
+
+        const ai = u32[b + 3];
+        if (ai == NONE)
+            return new Vec2(bu, bv);
+
+        const af = packed.attributes;
+        const w = 1.0 - bu - bv;
+        return new Vec2(
+            af[ai * 4 + 3] * w + af[(ai + 1) * 4 + 3] * bu + af[(ai + 2) * 4 + 3] * bv,
+            af[(ai + 3) * 4] * w + af[(ai + 3) * 4 + 1] * bu + af[(ai + 3) * 4 + 2] * bv);
+    }
+}
+
+/**
+ * Longitude and latitude on a globe: d is the unit direction from the
+ * centre, x where u = 0 on the equator, north the pole at v = 0.
+ * @param {Vec3} d
+ * @param {Vec3} x
+ * @param {Vec3} north
+ */
+export function sphereUv(d, x, north) {
+    const z = x.cross(north);
+    const u = Math.atan2(-d.dot(z), d.dot(x)) / (2.0 * Math.PI);
+    const v = Math.acos(Math.min(Math.max(d.dot(north), -1.0), 1.0)) / Math.PI;
+    return new Vec2(u - Math.floor(u), v);
+}
+
+/**
+ * Where a box-space point on a box's face falls on the texture: the face
+ * is the axis it's furthest out on, and the other two span the texture,
+ * upright on the four sides, seen from outside, measured in world units
+ * from the face's top left corner, so a texture keeps its size on boxes of
+ * any shape.
+ * @param {number[]} lp the point in box space, from -1 to 1
+ * @param {number[]} half the box's half-size along each axis, in world units
+ */
+export function boxUv(lp, half) {
+
+    const [x, y, z] = lp;
+    const ax = Math.abs(x), ay = Math.abs(y), az = Math.abs(z);
+
+    if (ax >= ay && ax >= az)
+        return new Vec2((1.0 - Math.sign(x) * z) * half[2], (1.0 - y) * half[1]);
+    if (ay >= az)
+        return new Vec2((1.0 + x) * half[0], (1.0 + Math.sign(y) * z) * half[2]);
+    return new Vec2((1.0 + Math.sign(z) * x) * half[0], (1.0 - y) * half[1]);
 }
 
 /** @param {number[]} a @param {number[]} b */

@@ -7,6 +7,7 @@ import { DENOISE_SHADER, DISPLAY_SHADER, TRACE_SHADER } from "../../src/shaders.
 const TYPES = {
     f32: { size: 4, align: 4 },
     u32: { size: 4, align: 4 },
+    vec2f: { size: 8, align: 8 },
     vec3f: { size: 12, align: 16 },
     vec4f: { size: 16, align: 16 },
 };
@@ -38,6 +39,12 @@ test("the packed records are the sizes the shader expects", () => {
 
     assert.equal(layout(TRACE_SHADER, "Primitive").size, 64, "Scene packs primitives in 64 bytes");
     assert.equal(layout(TRACE_SHADER, "Material").size, 64, "and materials in 64");
+
+    // Where Scene.#pack writes a material's texture index and scale.
+    const material = layout(TRACE_SHADER, "Material").offsets;
+    assert.equal(material.ior, 12 * 4);
+    assert.equal(material.texture, 13 * 4);
+    assert.equal(material.texture_scale, 14 * 4);
     assert.equal(layout(TRACE_SHADER, "Node").size, BVH.NODE_BYTES);
 });
 

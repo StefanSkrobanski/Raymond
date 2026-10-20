@@ -4,7 +4,7 @@
 // types aren't just `any`.
 
 import {
-    Box, Camera, Mat4, Material, Mesh, OrbitControls, Quad, Renderer, Scene, Sky, Sphere, Vec3,
+    Box, Camera, Mat4, Material, Mesh, OrbitControls, Quad, Renderer, Scene, Sky, Sphere, Texture, Vec2, Vec3,
     hexColor, type View,
 } from "@stefanskrobanski/raymond";
 
@@ -50,4 +50,16 @@ const stick: Box = Box.between(new Vec3(0, 0, 0), new Vec3(0, 1, 0), 0.1, Materi
 // @ts-expect-error: colours are Vec3s
 Material.diffuse("#ff0000");
 
-export { pixels, denoised, distance, stick };
+const checks: Texture = Texture.procedural(64, 64, (u, v) => new Vec3(u, v, 0.5));
+const loaded: Promise<Texture> = Texture.load("wood.png");
+const globe = new Sphere(new Vec3(0, 1, 0), 1, Material.diffuse(new Vec3(1, 1, 1)).withTexture(checks, new Vec2(2, 1)), { rotation: Mat4.rotateZ(0.4) });
+const strip = new Mesh(
+    [new Vec3(0, 0, 0), new Vec3(1, 0, 0), new Vec3(0, 1, 0)], [0, 1, 2],
+    Material.diffuse(new Vec3(1, 1, 1)).withTexture(checks, 3),
+    { uvs: [new Vec2(0, 0), new Vec2(1, 0), new Vec2(0, 1)] });
+const uv: Vec2 | undefined = scene.add(globe, strip).raycast(new Vec3(0, 1, 5), new Vec3(0, 0, -1))?.uv;
+
+// @ts-expect-error: a texture's scale is a number or a Vec2
+Material.diffuse(new Vec3(1, 1, 1)).withTexture(checks, "2");
+
+export { pixels, denoised, distance, stick, loaded, uv };

@@ -160,6 +160,24 @@ test("the albedo view shows each surface's colour", async () => {
         assert.deepEqual(rgb(pixels, i).map((c) => +c.toFixed(3)), [0.5, 0.5, 0.5]);
 });
 
+test("the GPU's textures match the CPU's, on every kind of primitive", async () => {
+
+    const size = 64;
+    const { pixels, hits } = await trace("textured", { view: "albedo", spp: 1, size });
+
+    let compared = 0, wrong = 0;
+    for (const i of interior(hits, size)) {
+        compared++;
+        const gpu = rgb(pixels, i), cpu = hits[i].albedo;
+        if ([0, 1, 2].some((c) => Math.abs(gpu[c] - cpu[c]) > 0.02))
+            wrong++;
+    }
+
+    assert.ok(compared > size * size * 0.6, `most pixels see something (${compared})`);
+    // A few pixels where the grid's colours change may filter differently.
+    assert.ok(wrong <= compared * 0.01, `${wrong} of ${compared} pixels disagree`);
+});
+
 // ---- Light, against exact answers ----
 
 test("a white furnace: a diffuse ball reflects exactly its albedo", async () => {

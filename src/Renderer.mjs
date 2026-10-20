@@ -20,6 +20,12 @@ const BUFFER_COPY_DST = 0x0008;
 const BUFFER_UNIFORM = 0x0040;
 const BUFFER_STORAGE = 0x0080;
 const MAP_READ = 0x0001;
+const TEXTURE_COPY_DST = 0x02;
+const TEXTURE_BINDING = 0x04;
+
+// Textures are packed into one array texture, all resized to the largest
+// one's size, up to this.
+const MAX_TEXTURE_SIZE = 2048;
 
 const PARAMS_BYTES = 192;
 // The denoiser's à-trous passes, each spreading twice as far as the last.
@@ -75,6 +81,9 @@ export class Renderer {
     // The uploaded scene, and which version of which scene it was.
     /** @type {GPUBuffer[]} */
     #scene_buffers = [];
+    /** @type {GPUTexture | null} */
+    #textures = null;
+    #sampler;
     /** @type {Scene | null} */
     #uploaded_scene = null;
     #uploaded_version = -1;
@@ -120,6 +129,14 @@ export class Renderer {
             label: "params",
             size: PARAMS_BYTES,
             usage: BUFFER_UNIFORM | BUFFER_COPY_DST,
+        });
+
+        // Bilinear, repeating: the CPU's Texture.sample does the same.
+        this.#sampler = device.createSampler({
+            magFilter: "linear",
+            minFilter: "linear",
+            addressModeU: "repeat",
+            addressModeV: "repeat",
         });
 
         // prepare, the à-trous passes, then compose.
@@ -376,6 +393,7 @@ export class Renderer {
             buffer.destroy();
         for (const buffer of [...this.#pixel_buffers, ...this.#pass_buffers])
             buffer.destroy();
+        this.#textures?.destroy();
         this.#accum?.destroy();
         this.#params_buffer.destroy();
         this.#context.unconfigure();
@@ -408,11 +426,12 @@ export class Renderer {
             storage("primitives", packed.primitives),
             storage("nodes", packed.nodes),
             storage("materials", packed.materials),
-            storage("normals", packed.normals),
+            storage("attributes", packed.attributes),
             storage("lights", packed.lights),
         ];
 
         this.#light_count = packed.lights[0] == 0xffffffff ? 0 : packed.lights.length;
+        this.#uploadTextures(packed.textures);
         this.#uploaded_scene = scene;
         this.#uploaded_version = scene.version;
         this.#trace_group = null;
@@ -420,6 +439,36 @@ export class Renderer {
 
         if (this.#accum)
             this.#bind();
+    }
+
+    // Packs the textures into one array texture, one layer each, resized
+    // to the largest one's size. With none, a single white pixel stands in,
+    // since something must be bound.
+    /** @param {import("./Texture.mjs").Texture[]} textures */
+    #uploadTextures(textures) {
+
+        this.#textures?.destroy();
+
+        const width = Math.min(MAX_TEXTURE_SIZE, Math.max(1, ...textures.map((t) => t.width)));
+        const height = Math.min(MAX_TEXTURE_SIZE, Math.max(1, ...textures.map((t) => t.height)));
+        const layers = Math.max(1, textures.length);
+
+        this.#textures = this.#device.createTexture({
+            label: "textures",
+            size: { width, height, depthOrArrayLayers: layers },
+            format: "rgba8unorm-srgb",
+            usage: TEXTURE_BINDING | TEXTURE_COPY_DST,
+        });
+
+        const data = textures.length > 0 ?
+            textures.map((t) => t.resized(width, height).data) :
+            [new Uint8Array([255, 255, 255, 255])];
+
+        data.forEach((bytes, layer) => this.#device.queue.writeTexture(
+            { texture: /** @type {GPUTexture} */ (this.#textures), origin: { x: 0, y: 0, z: layer } },
+            bytes,
+            { bytesPerRow: width * 4, rowsPerImage: height },
+            { width, height, depthOrArrayLayers: 1 }));
     }
 
     /**
@@ -451,7 +500,7 @@ export class Renderer {
     #bind() {
 
         const accum = /** @type {GPUBuffer} */ (this.#accum);
-        const [primitives, nodes, materials, normals, lights] = this.#scene_buffers;
+        const [primitives, nodes, materials, attributes, lights] = this.#scene_buffers;
         const [guide_albedo, guide_normal, light_a, light_b, denoised] = this.#pixel_buffers;
 
         this.#trace_group = this.#device.createBindGroup({
@@ -461,11 +510,13 @@ export class Renderer {
                 { binding: 1, resource: { buffer: primitives } },
                 { binding: 2, resource: { buffer: nodes } },
                 { binding: 3, resource: { buffer: materials } },
-                { binding: 4, resource: { buffer: normals } },
+                { binding: 4, resource: { buffer: attributes } },
                 { binding: 5, resource: { buffer: lights } },
                 { binding: 6, resource: { buffer: accum } },
                 { binding: 7, resource: { buffer: guide_albedo } },
                 { binding: 8, resource: { buffer: guide_normal } },
+                { binding: 9, resource: /** @type {GPUTexture} */ (this.#textures).createView({ dimension: "2d-array" }) },
+                { binding: 10, resource: this.#sampler },
             ],
         });
 

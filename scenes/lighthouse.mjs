@@ -1,5 +1,6 @@
 import { Box, Mat4, Material, Mesh, Quad, Scene, Sky, Sphere, Vec3, hexColor } from "../src/index.mjs";
 import { cylinder, placed, profile, seededRandom, stars } from "./helpers.mjs";
+import { stone } from "./textures.mjs";
 
 // The tower: a tapering column, in stripes. Each band is its own lathe
 // section, so it can have its own colour.
@@ -32,7 +33,7 @@ export function lighthouse() {
 
     // The rock: a heap of boulders.
     const random = seededRandom(9);
-    const rock = Material.diffuse(hexColor("#3b3836"));
+    const rock = Material.diffuse(hexColor("#8a847c")).withTexture(stone(), 2, hexColor("#8a847c"));
     for (let i = 0; i < 26; ++i) {
         const a = random() * 2 * Math.PI, r = random() * 2.2;
         const size = 0.5 + random() * 0.8;

@@ -1,4 +1,5 @@
 import { Box, Mat4, Material, Quad, Scene, Sky, Sphere, Vec3, hexColor } from "../src/index.mjs";
+import { planks, plaster } from "./textures.mjs";
 
 // The room: x and z from -3 to 3, y from 0 to 3, with a window in the
 // x = -3 wall from z -1.2 to 1.2 and y 0.7 to 2.5.
@@ -42,8 +43,8 @@ export function sunbeams() {
         }),
     });
 
-    const wall = Material.diffuse(hexColor("#e9e3d6"));
-    const floor = Material.checkered(hexColor("#9b6a43"), hexColor("#8a5c38"), 0.4);
+    const wall = Material.diffuse(new Vec3(1, 1, 1)).withTexture(plaster(), 3);
+    const floor = Material.plastic(new Vec3(1, 1, 1), 0.4).withTexture(planks(), 2);
 
     scene.add(
         new Quad(new Vec3(-3, 0, 3), new Vec3(6, 0, 0), new Vec3(0, 0, -6), floor),

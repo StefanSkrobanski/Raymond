@@ -19,14 +19,17 @@ function signedVolume(mesh) {
 }
 
 // Closed and consistently wound: every edge is used once in each direction.
+// Edges are compared by where their ends are, not their vertex numbers, as
+// a texture seam repeats vertices.
 function assertWatertight(mesh, name) {
 
     const edges = new Map();
     const t = mesh.indices;
+    const at = (i) => [mesh.positions[i].x, mesh.positions[i].y, mesh.positions[i].z].map((c) => c.toFixed(9)).join(" ");
 
     for (let i = 0; i < t.length; i += 3) {
         for (let k = 0; k < 3; ++k) {
-            const key = `${t[i + k]},${t[i + (k + 1) % 3]}`;
+            const key = `${at(t[i + k])},${at(t[i + (k + 1) % 3])}`;
             edges.set(key, (edges.get(key) ?? 0) + 1);
         }
     }
@@ -75,11 +78,12 @@ test("a tube's rings stay round and at its radius from the curve", () => {
     const segments = 90;
     const mesh = Mesh.tube(knot, WHITE, { radius: 0.3, segments, sides: 10 });
 
-    // Each ring of vertices is centred on the curve.
+    // Each ring of vertices is centred on the curve (with the first vertex
+    // repeated at the end, for the texture's seam).
     for (let s = 0; s < segments; ++s) {
         const centre = knot(s / segments);
-        for (let k = 0; k < 10; ++k)
-            assertClose(mesh.positions[s * 10 + k].subtract(centre).length(), 0.3, `ring ${s}`, 1e-9);
+        for (let k = 0; k <= 10; ++k)
+            assertClose(mesh.positions[s * 11 + k].subtract(centre).length(), 0.3, `ring ${s}`, 1e-9);
     }
 });
 

@@ -1,5 +1,6 @@
-import { Box, Material, Quad, Scene, Sky, Sphere, Vec3, hexColor } from "../src/index.mjs";
+import { Box, Material, Quad, Scene, Sky, Sphere, Vec2, Vec3, hexColor } from "../src/index.mjs";
 import { hsv } from "./helpers.mjs";
+import { wood as woodTexture } from "./textures.mjs";
 
 export const BALL_RADIUS = 0.057;
 
@@ -25,7 +26,7 @@ export function billiards() {
     });
 
     const felt = Material.diffuse(hexColor("#1f6b3a"));
-    const wood = Material.plastic(hexColor("#4a2511"), 0.2);
+    const wood = Material.plastic(hexColor("#6a3a1e"), 0.2).withTexture(woodTexture(), new Vec2(4, 1), hexColor("#8a5a3a"));
 
     scene.add(
         // The bed, cushions and rails: the playing area is 2.54 by 1.27.
