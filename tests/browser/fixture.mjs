@@ -3,8 +3,17 @@
 // each pixel's centre.
 
 import {
-    Box, Camera, Mat4, Material, Mesh, Quad, Renderer, Scene, Sky, Sphere, Vec3,
+    Box, Camera, Mat4, Material, Mesh, Quad, Renderer, Scene, Sky, Sphere, Texture, Vec2, Vec3,
 } from "../../src/index.mjs";
+
+// Two textures of the same size (so the renderer needn't resize either):
+// smooth colour gradients, and a coarse grid of distinct colours that
+// shows which way round a texture is.
+const GRADIENT = Texture.procedural(64, 64, (u, v) => new Vec3(u, v, 0.5 + 0.5 * Math.sin(u * 6.28)));
+const GRID = Texture.procedural(64, 64, (u, v) => {
+    const i = Math.floor(u * 4), j = Math.floor(v * 4);
+    return new Vec3((i + 1) / 4, (j + 1) / 4, ((i + j) % 2) * 0.8 + 0.1);
+});
 
 const BLACK = new Vec3(0, 0, 0);
 const WHITE_SKY = new Sky({ zenith: new Vec3(1, 1, 1), horizon: new Vec3(1, 1, 1), ground: new Vec3(1, 1, 1) });
@@ -88,6 +97,19 @@ const SCENES = {
         camera: { position: new Vec3(0.5, 2.2, 3.2), target: new Vec3(0, 0.4, -0.5), fov: Math.PI / 3 },
     }),
 
+    // Every kind of primitive with a texture on it, for comparing the GPU's
+    // texture lookups with the CPU's.
+    textured: () => ({
+        scene: new Scene({ sky: Sky.black() }).add(
+            new Quad(new Vec3(-10, 0, 10), new Vec3(20, 0, 0), new Vec3(0, 0, -20), Material.diffuse(new Vec3(1, 1, 1)).withTexture(GRID, 6)),
+            new Sphere(new Vec3(-1.0, 0.7, 0), 0.7, Material.diffuse(new Vec3(1, 1, 1)).withTexture(GRADIENT),
+                { rotation: Mat4.rotateZ(0.4).multiplyMat4(Mat4.rotateY(1.0)) }),
+            Box.fromCorners(new Vec3(0.3, 0, -0.9), new Vec3(1.3, 1.0, 0.1), Material.plastic(new Vec3(1, 0.8, 0.8)).withTexture(GRID, new Vec2(1, 2), new Vec3(1, 0.8, 0.8)), 0.5),
+            Mesh.torus(Material.diffuse(new Vec3(1, 1, 1)).withTexture(GRADIENT, 3), { radius: 0.4, tube: 0.18, segments: 32, sides: 16 })
+                .transformed(Mat4.translate(0.6, 0.35, 1.0).multiplyMat4(Mat4.rotateX(1.1)))),
+        camera: { position: new Vec3(0.8, 2.6, 3.8), target: new Vec3(0, 0.4, 0), fov: Math.PI / 3 },
+    }),
+
     lightAsMesh: (material) => ({
         scene: new Scene({ sky: Sky.black() }).add(
             floor(MATERIALS[material]),
@@ -145,11 +167,17 @@ async function trace(name, { arg, spp = 16, bounces = 8, view = "color", size = 
         for (let x = 0; x < size; ++x) {
             const ray = camera.pixelRay(x, y, size, size);
             const hit = scene.raycast(ray.origin, ray.direction);
+            // The surface's colour as the CPU works it out.
+            const m = hit?.material;
+            const color = m && (m.texture ?
+                m.color.multiply(m.texture.sample(hit.uv.x * m.textureScale.x, hit.uv.y * m.textureScale.y)) :
+                m.color);
             hits.push(hit && {
                 object: scene.objects.indexOf(hit.object),
                 distance: hit.distance,
                 point: [hit.point.x, hit.point.y, hit.point.z],
                 normal: [hit.normal.x, hit.normal.y, hit.normal.z],
+                albedo: [color.x, color.y, color.z],
             });
         }
     }

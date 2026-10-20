@@ -1,4 +1,6 @@
+import { Vec2 } from "./Vec2.mjs";
 import { Vec3 } from "./Vec3.mjs";
+/** @import { Texture } from "./Texture.mjs" */
 
 /**
  * How a surface scatters light:
@@ -21,6 +23,10 @@ import { Vec3 } from "./Vec3.mjs";
  * @property {Vec3 | null} [checker] a second colour, drawn as a 3D
  *   checkerboard with color, or null for a plain colour
  * @property {number} [checkerSize] the size of the checkerboard's squares
+ * @property {Texture | null} [texture] an image to wrap over the surface,
+ *   multiplying color (so leave color white to show it as it is)
+ * @property {Vec2} [textureScale] how many times the texture repeats across
+ *   the surface's u and v
  */
 
 /** The numeric code for each type, as the shader sees it. */
@@ -44,6 +50,9 @@ export class Material {
     /** @type {Vec3 | null} */
     #checker;
     #checkerSize;
+    /** @type {Texture | null} */
+    #texture;
+    #textureScale;
 
     /** @param {MaterialOptions} [options] */
     constructor({
@@ -54,6 +63,8 @@ export class Material {
         emission = new Vec3(0.0, 0.0, 0.0),
         checker = null,
         checkerSize = 1.0,
+        texture = null,
+        textureScale = new Vec2(1.0, 1.0),
     } = {}) {
 
         if (!(type in MATERIAL_TYPES))
@@ -66,6 +77,8 @@ export class Material {
         this.#emission = emission;
         this.#checker = checker;
         this.#checkerSize = checkerSize;
+        this.#texture = texture;
+        this.#textureScale = textureScale;
     }
 
     get type() {
@@ -94,6 +107,35 @@ export class Material {
 
     get checkerSize() {
         return this.#checkerSize;
+    }
+
+    get texture() {
+        return this.#texture;
+    }
+
+    get textureScale() {
+        return this.#textureScale;
+    }
+
+    /**
+     * A copy of this material with a texture wrapped over it. The texture
+     * multiplies the colour, which becomes white unless given.
+     * @param {Texture} texture
+     * @param {number | Vec2} [scale] how many times it repeats across u and v
+     * @param {Vec3} [color] a tint
+     */
+    withTexture(texture, scale = 1.0, color = new Vec3(1.0, 1.0, 1.0)) {
+
+        return new Material({
+            type: this.#type,
+            color,
+            roughness: this.#roughness,
+            ior: this.#ior,
+            emission: this.#emission,
+            checker: null,
+            texture,
+            textureScale: typeof scale == "number" ? new Vec2(scale, scale) : scale,
+        });
     }
 
     /** True if the material gives off light. */

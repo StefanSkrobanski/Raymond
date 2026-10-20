@@ -1,5 +1,6 @@
-import { Box, Mat4, Material, Mesh, Quad, Scene, Sky, Sphere, Vec3, hexColor } from "../src/index.mjs";
+import { Box, Mat4, Material, Mesh, Quad, Scene, Sky, Sphere, Vec2, Vec3, hexColor } from "../src/index.mjs";
 import { placed, profile } from "./helpers.mjs";
+import { planks } from "./textures.mjs";
 
 // A tenpin, 0.38 tall, as a lathe profile.
 export const PIN = profile([
@@ -27,11 +28,14 @@ export function bowling() {
         sky: new Sky({ zenith: new Vec3(0.02, 0.02, 0.03), horizon: new Vec3(0.04, 0.04, 0.05), ground: new Vec3(0, 0, 0) }),
     });
 
-    const lane = Material.checkered(hexColor("#d9a066"), hexColor("#cf9358"), 0.06);
+    // Boards running down the lane, about 39 across it: the planks run
+    // along the texture's u, which on the box's top is its own x, so the
+    // box is turned to lay its x down the lane.
+    const lane = Material.plastic(new Vec3(1, 1, 1), 0.12).withTexture(planks(), new Vec2(0.15, 4.6), hexColor("#ffe2c0"));
 
     scene.add(
         // The lane, its gutters, and the dark pit beyond.
-        Box.fromCorners(new Vec3(-0.53, -0.1, -2), new Vec3(0.53, 0, 12), lane),
+        new Box(Mat4.translate(0, -0.05, 5).multiplyMat4(Mat4.rotateY(Math.PI / 2)).multiplyMat4(Mat4.scale(7, 0.05, 0.53)), lane),
         Box.fromCorners(new Vec3(-0.75, -0.18, -2), new Vec3(-0.53, -0.08, 12), Material.metal(hexColor("#9aa0a8"), 0.3)),
         Box.fromCorners(new Vec3(0.53, -0.18, -2), new Vec3(0.75, -0.08, 12), Material.metal(hexColor("#9aa0a8"), 0.3)),
         new Quad(new Vec3(-20, -0.2, 20), new Vec3(40, 0, 0), new Vec3(0, 0, -40), Material.diffuse(hexColor("#141218"))),

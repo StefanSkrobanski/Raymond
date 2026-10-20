@@ -11,7 +11,7 @@ const LAMP = Material.light(new Vec3(1, 1, 1), 5.0);
 function prim(packed, i) {
     const f = new Float32Array(packed.primitives, i * 64, 16);
     const u = new Uint32Array(packed.primitives, i * 64, 16);
-    return { kind: u[0], material: u[1], light: u[2], normals: u[3], f };
+    return { kind: u[0], material: u[1], light: u[2], attributes: u[3], f };
 }
 
 test("packing gives one primitive per sphere, quad and box, and per triangle", () => {
@@ -89,15 +89,17 @@ test("smooth triangles point at their vertex normals; flat ones don't", () => {
     for (let i = 0; i < packed.primitiveCount; ++i) {
         const record = prim(packed, i);
         if (packed.objects[i] === flat) {
-            assert.equal(record.normals, NONE);
+            assert.equal(record.attributes, NONE);
         }
         else {
-            // A unit sphere's vertex normals are its vertices.
+            // A unit sphere's vertex normals are its vertices; the block's
+            // last vec4 says they're there.
             for (let k = 0; k < 3; ++k) {
-                const n = packed.normals.subarray((record.normals + k) * 4, (record.normals + k) * 4 + 3);
+                const n = packed.attributes.subarray((record.attributes + k) * 4, (record.attributes + k) * 4 + 3);
                 const v = record.f.subarray(4 + k * 4, 7 + k * 4);
                 [0, 1, 2].forEach((a) => assertClose(n[a], v[a], "normal", 1e-6));
             }
+            assert.equal(packed.attributes[(record.attributes + 3) * 4 + 3], 1);
         }
     }
 });
@@ -126,7 +128,8 @@ test("an empty scene packs to something bindable that no ray hits", () => {
 
     assert.equal(packed.primitiveCount, 0);
     assert.ok(packed.primitives.byteLength >= 64);
-    assert.ok(packed.lights.length >= 1 && packed.normals.length >= 4);
+    assert.ok(packed.lights.length >= 1 && packed.attributes.length >= 4);
+    assert.deepEqual(packed.textures, []);
     assert.equal(prim(packed, 0).kind, NONE);
     assert.equal(new Uint32Array(packed.nodes)[7], 1, "the root is a leaf");
     assert.equal(scene.raycast(new Vec3(0, 0, 5), new Vec3(0, 0, -1)), null);

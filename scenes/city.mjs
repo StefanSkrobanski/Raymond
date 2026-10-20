@@ -1,5 +1,6 @@
-import { Box, Material, Quad, Scene, Sky, Vec3, hexColor } from "../src/index.mjs";
+import { Box, Material, Quad, Scene, Sky, Vec2, Vec3, hexColor } from "../src/index.mjs";
 import { seededRandom } from "./helpers.mjs";
+import { windows } from "./textures.mjs";
 
 /**
  * The city's buildings, as boxes standing on the ground: a 12 × 12 grid
@@ -33,7 +34,20 @@ export function buildings() {
             const half = 0.28 + 0.1 * random();
             const material = height > 2 ? materials[3 + Math.floor(random() * 3)] : materials[Math.floor(random() * 3)];
 
-            boxes.push(Box.fromCorners(new Vec3(cx - half, 0, cz - half), new Vec3(cx + half, height, cz + half), material, random() < 0.15 ? 0.3 : 0));
+            // Taller buildings are offices, with windows up their sides
+            // (four floors to the texture, about 0.12 a floor) under a
+            // plain roof.
+            const turn = random() < 0.15 ? 0.3 : 0;
+            if (height > 1.0) {
+                // Boxes map textures by world size: four bays every 0.6
+                // across, four floors every 0.48 up.
+                const offices = Material.plastic(material.color, 0.3).withTexture(windows(), new Vec2(1 / 0.6, 1 / 0.48), material.color.lerp(new Vec3(1, 1, 1), 0.5));
+                boxes.push(Box.fromCorners(new Vec3(cx - half, 0, cz - half), new Vec3(cx + half, height, cz + half), offices, turn));
+                boxes.push(Box.fromCorners(new Vec3(cx - half - 0.01, height, cz - half - 0.01), new Vec3(cx + half + 0.01, height + 0.03, cz + half + 0.01), material, turn));
+            }
+            else {
+                boxes.push(Box.fromCorners(new Vec3(cx - half, 0, cz - half), new Vec3(cx + half, height, cz + half), material, turn));
+            }
 
             // Tall towers get a setback and a spire.
             if (height > 2.4) {

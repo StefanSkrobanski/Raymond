@@ -1,5 +1,6 @@
 import { Box, Material, Mesh, Quad, Scene, Sky, Vec3, hexColor } from "../src/index.mjs";
 import { placed, profile } from "./helpers.mjs";
+import { wood } from "./textures.mjs";
 
 // Each piece's profile, about 1 square across at the base.
 const BASE = [[0, 0], [0.38, 0], [0.38, 0.08], [0.32, 0.12]];
@@ -24,7 +25,7 @@ export function chess() {
     // The board: 8 squares of 1 from -4 to 4, its top at 0, in a wooden frame.
     scene.add(
         Box.fromCorners(new Vec3(-4, -0.3, -4), new Vec3(4, 0, 4), Material.checkered(hexColor("#ead9b8"), hexColor("#3b2416"), 1.0)),
-        Box.fromCorners(new Vec3(-4.5, -0.32, -4.5), new Vec3(4.5, -0.02, 4.5), Material.plastic(hexColor("#5a321c"), 0.25)),
+        Box.fromCorners(new Vec3(-4.5, -0.32, -4.5), new Vec3(4.5, -0.02, 4.5), Material.plastic(hexColor("#5a321c"), 0.25).withTexture(wood(), 0.3, hexColor("#9a6a48"))),
         new Quad(new Vec3(-30, -0.32, 30), new Vec3(60, 0, 0), new Vec3(0, 0, -60), Material.diffuse(hexColor("#2a2420"))));
 
     const white = Material.glass(1.5, hexColor("#f2f8ff"));

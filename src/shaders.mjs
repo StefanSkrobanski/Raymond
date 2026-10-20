@@ -47,7 +47,7 @@ const GLASS = 3u;
 const LIGHT = 4u;
 
 struct Primitive {
-    kind: u32, material: u32, light: u32, normals: u32,
+    kind: u32, material: u32, light: u32, attributes: u32,
     p0: vec4f, p1: vec4f, p2: vec4f,
 }
 
@@ -60,14 +60,15 @@ struct Material {
     color: vec3f, kind: u32,
     emission: vec3f, roughness: f32,
     checker: vec3f, checker_size: f32,
-    ior: f32, _p0: f32, _p1: f32, _p2: f32,
+    ior: f32, texture: u32, texture_scale: vec2f,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> prims: array<Primitive>;
 @group(0) @binding(2) var<storage, read> nodes: array<Node>;
 @group(0) @binding(3) var<storage, read> materials: array<Material>;
-@group(0) @binding(4) var<storage, read> normals: array<vec4f>;
+// Triangles' vertex normals and texture coordinates: see PackedScene.
+@group(0) @binding(4) var<storage, read> attributes: array<vec4f>;
 @group(0) @binding(5) var<storage, read> lights: array<u32>;
 // Per pixel, summed over samples: the colour, with the luminance squared in
 // w (for the noise estimate); and the denoiser's guides, the albedo and
@@ -75,6 +76,8 @@ struct Material {
 @group(0) @binding(6) var<storage, read_write> accum: array<vec4f>;
 @group(0) @binding(7) var<storage, read_write> guide_albedo: array<vec4f>;
 @group(0) @binding(8) var<storage, read_write> guide_normal: array<vec4f>;
+@group(0) @binding(9) var textures: texture_2d_array<f32>;
+@group(0) @binding(10) var texture_sampler: sampler;
 
 // ---- Random numbers: PCG ----
 
@@ -332,6 +335,7 @@ struct Surface {
     material: u32,
     light: u32,
     kind: u32,
+    uv: vec2f,     // where it falls on the material's texture
 }
 
 fn surface(o: vec3f, d: vec3f, hit: Hit) -> Surface {
@@ -340,29 +344,42 @@ fn surface(o: vec3f, d: vec3f, hit: Hit) -> Surface {
     let point = o + d * hit.t;
     var ng: vec3f;
     var ns: vec3f;
+    var uv: vec2f;
 
+    // The texture coordinates follow Scene.raycast's: see Scene.#uv.
     switch p.kind {
         case 0u: {
             ng = normalize(point - p.p0.xyz);
             ns = ng;
+            // Longitude and latitude on the globe.
+            let z = cross(p.p1.xyz, p.p2.xyz);
+            let u = atan2(-dot(ng, z), dot(ng, p.p1.xyz)) / (2.0 * PI);
+            uv = vec2f(u - floor(u), acos(clamp(dot(ng, p.p2.xyz), -1.0, 1.0)) / PI);
         }
         case 1u: {
             ng = normalize(cross(p.p1.xyz, p.p2.xyz));
             ns = ng;
+            uv = vec2f(hit.u, 1.0 - hit.v);
         }
         case 2u: {
             // The axis on which the box-space point is furthest out; its
             // row of the world-to-box matrix is the face's world normal.
             let lp = vec3f(dot(p.p0.xyz, point) + p.p0.w, dot(p.p1.xyz, point) + p.p1.w, dot(p.p2.xyz, point) + p.p2.w);
             let a = abs(lp);
+            // The box's half-size along each of its axes, in world units:
+            // the world-to-box rows shrink as the box grows.
+            let half = 1.0 / vec3f(length(p.p0.xyz), length(p.p1.xyz), length(p.p2.xyz));
             if (a.x >= a.y && a.x >= a.z) {
                 ng = p.p0.xyz * sign(lp.x);
+                uv = vec2f((1.0 - sign(lp.x) * lp.z) * half.z, (1.0 - lp.y) * half.y);
             }
             else if (a.y >= a.z) {
                 ng = p.p1.xyz * sign(lp.y);
+                uv = vec2f((1.0 + lp.x) * half.x, (1.0 + sign(lp.y) * lp.z) * half.z);
             }
             else {
                 ng = p.p2.xyz * sign(lp.z);
+                uv = vec2f((1.0 + sign(lp.z) * lp.x) * half.x, (1.0 - lp.y) * half.y);
             }
             ng = normalize(ng);
             ns = ng;
@@ -370,11 +387,19 @@ fn surface(o: vec3f, d: vec3f, hit: Hit) -> Surface {
         default: {
             ng = normalize(cross(p.p1.xyz - p.p0.xyz, p.p2.xyz - p.p0.xyz));
             ns = ng;
-            if (p.normals != NONE) {
+            uv = vec2f(hit.u, hit.v);
+            if (p.attributes != NONE) {
                 let w = 1.0 - hit.u - hit.v;
-                ns = normalize(normals[p.normals].xyz * w + normals[p.normals + 1u].xyz * hit.u + normals[p.normals + 2u].xyz * hit.v);
-                if (dot(ns, ng) < 0.0) {
-                    ns = -ns;
+                let a0 = attributes[p.attributes];
+                let a1 = attributes[p.attributes + 1u];
+                let a2 = attributes[p.attributes + 2u];
+                let vs = attributes[p.attributes + 3u];
+                uv = vec2f(a0.w * w + a1.w * hit.u + a2.w * hit.v, vs.x * w + vs.y * hit.u + vs.z * hit.v);
+                if (vs.w != 0.0) {
+                    ns = normalize(a0.xyz * w + a1.xyz * hit.u + a2.xyz * hit.v);
+                    if (dot(ns, ng) < 0.0) {
+                        ns = -ns;
+                    }
                 }
             }
         }
@@ -383,7 +408,7 @@ fn surface(o: vec3f, d: vec3f, hit: Hit) -> Surface {
     let front = dot(ng, d) < 0.0;
     let flip = select(-1.0, 1.0, front);
 
-    return Surface(point, ns * flip, ng * flip, front, p.material, p.light, p.kind);
+    return Surface(point, ns * flip, ng * flip, front, p.material, p.light, p.kind, uv);
 }
 
 fn occluded(o: vec3f, d: vec3f, dist: f32) -> bool {
@@ -412,13 +437,19 @@ fn in_sun(d: vec3f) -> bool {
 
 // ---- Materials ----
 
-fn albedo(m: Material, p: vec3f) -> vec3f {
+// The surface's colour at point p, texture coordinate uv: its colour, or
+// the checkerboard's, times its texture if it has one.
+fn albedo(m: Material, p: vec3f, uv: vec2f) -> vec3f {
+    var c = m.color;
     if (m.checker_size > 0.0) {
-        let c = floor(p / m.checker_size + 1e-3);
-        let odd = (i32(c.x) + i32(c.y) + i32(c.z)) & 1;
-        return select(m.color, m.checker, odd != 0);
+        let cell = floor(p / m.checker_size + 1e-3);
+        let odd = (i32(cell.x) + i32(cell.y) + i32(cell.z)) & 1;
+        c = select(m.color, m.checker, odd != 0);
     }
-    return m.color;
+    if (m.texture != NONE) {
+        c *= textureSampleLevel(textures, texture_sampler, uv * m.texture_scale, m.texture, 0.0).rgb;
+    }
+    return c;
 }
 
 fn is_delta(m: Material) -> bool {
@@ -744,7 +775,7 @@ fn radiance(px: vec2f) -> vec3f {
         // edges.
         if (!guided && (m.kind == LIGHT || !is_delta(m) || depth == params.max_bounces)) {
             guided = true;
-            g_albedo = throughput * select(albedo(m, s.p), vec3f(1.0), m.kind == LIGHT);
+            g_albedo = throughput * select(albedo(m, s.p, s.uv), vec3f(1.0), m.kind == LIGHT);
             g_normal = vec4f(s.n, travelled);
         }
 
@@ -763,7 +794,7 @@ fn radiance(px: vec2f) -> vec3f {
             break;
         }
 
-        let base = albedo(m, s.p);
+        let base = albedo(m, s.p, s.uv);
         let wo = -d;
 
         // Next event estimation: aim a ray straight at a light.
@@ -828,7 +859,7 @@ fn inspect(px: vec2f) -> vec3f {
             if (m.kind == LIGHT) {
                 return m.emission / max(max(m.emission.x, m.emission.y), max(m.emission.z, 1.0));
             }
-            return albedo(m, s.p);
+            return albedo(m, s.p, s.uv);
         }
         case 2u: {
             return s.n;

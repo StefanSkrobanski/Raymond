@@ -1,5 +1,6 @@
 import { Mat4, Material, Mesh, Quad, Scene, Sky, Sphere, Vec3, hexColor } from "../src/index.mjs";
 import { cylinder, placed, profile } from "./helpers.mjs";
+import { wood } from "./textures.mjs";
 
 /** Each candle: where it stands, how tall it is, and its radius. */
 export const CANDLES = [
@@ -20,7 +21,7 @@ export function candlelight() {
     const wax = Material.plastic(hexColor("#f2e6cf"), 0.5);
 
     scene.add(
-        new Quad(new Vec3(-10, 0, 10), new Vec3(20, 0, 0), new Vec3(0, 0, -20), Material.plastic(hexColor("#2b1a12"), 0.3)),
+        new Quad(new Vec3(-10, 0, 10), new Vec3(20, 0, 0), new Vec3(0, 0, -20), Material.plastic(hexColor("#2b1a12"), 0.3).withTexture(wood(), 6, hexColor("#5a3a26"))),
         new Quad(new Vec3(-10, 0, -1.5), new Vec3(20, 0, 0), new Vec3(0, 6, 0), Material.diffuse(hexColor("#3a2c26"))));
 
     for (const { x, z, height, radius } of CANDLES) {

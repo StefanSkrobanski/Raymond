@@ -9,15 +9,16 @@ A progressive path tracer for WebGPU, in plain JavaScript ES modules with no dep
 - **Path tracing in a compute shader**, with next event estimation (aiming rays straight at lights) combined with BSDF sampling by multiple importance sampling, and Russian roulette to end dim paths.
 - **Shapes:** spheres, quads (flat parallelograms), boxes under any affine transform (including sticks between two points), and triangle meshes with smooth or flat shading: generated spheres, tori, tubes round any closed curve, solids turned on a lathe, and parametric surfaces. Everything goes in one bounding volume hierarchy, built on the CPU with the surface area heuristic and traversed on the GPU.
 - **Materials:** diffuse, metal and plastic (GGX microfacets, from polished to rough), glass (exact Fresnel, refraction, tint), lights, and 3D checkerboards.
+- **Textures** on every shape: from image files (`Texture.load`) or drawn by a function (`Texture.procedural`), filtered and repeating, with spheres mapped by latitude and longitude, box faces by their size in world units, and meshes by their own texture coordinates (generated for the built-in shapes). The demo's wood, marble, brick, stone and planets are all procedural.
 - **Lights:** emissive quads and spheres, sampled directly; a sky gradient; a sun with a soft-edged disc.
 - **A denoiser** that clears the grain from the first few samples: an edge-avoiding à-trous wavelet filter guided by each pixel's albedo, normal and distance, and steered by an estimate of its noise (as in SVGF), so it backs off as the samples build up and the image still converges to the exact answer.
 - **A thin-lens camera** with depth of field, and **inspection views** of albedo, normals and depth.
 - **Orbit controls** for mouse, touch and pen, adapted from [Styx](https://github.com/StefanSkrobanski/Styx), whose maths library Raymond also uses.
 - **A CPU raycast** with exactly the shader's tests, on the same packed data, for picking (tap to focus) and for testing the GPU.
 
-The demo app has 42 scenes in five groups:
+The demo app has 43 scenes in five groups:
 
-- **Classics:** two Cornell boxes, a field of spheres, a material chart and Eric Haines's sphereflake.
+- **Classics:** two Cornell boxes, a field of spheres, a material chart, a texture gallery and Eric Haines's sphereflake.
 - **Light and glass:** a glass garden, a swimming pool and a coffee cup's caustics, cut gems, a hall of mirrors, sunbeams through a blind, neon, a crystal cave, candlelight, a magnifying glass and a glass of water.
 - **Objects:** a still life, Newton's cradle, chess, bowling, billiards, a Rubik's cube, toy bricks, a pendulum wave, a domino spiral, DNA, an atom and a rocket launch.
 - **Places:** an island at sunset, a tiny city, the solar system, Stonehenge, a spiral staircase, a low-poly forest, a snowman, a lighthouse, the pyramids and hot-air balloons.
@@ -54,6 +55,16 @@ frame();
 ```
 
 Changing anything that affects the image (the camera, the scene's objects or sky, the canvas size, `maxBounces`, `view`) is noticed on the next `render()`, which starts the average again; `exposure` and `denoise` (on by default) only change how it's shown. Colours are linear RGB from 0 to 1; `hexColor("#ff8800")` converts from CSS's sRGB. [`examples/basic.html`](examples/basic.html) is this example as a page.
+
+To wrap an image round something, give its material a texture; the material's colour tints it:
+
+```js
+const earth = await Texture.load("earth.jpg");
+scene.add(new Sphere(new Vec3(0, 1, 0), 1, Material.diffuse(new Vec3(1, 1, 1)).withTexture(earth),
+    { rotation: Mat4.rotateZ(0.41) }));  // tilt the globe's axis
+```
+
+`withTexture(texture, scale)` repeats it `scale` times (a number, or a `Vec2` for across and down) over a sphere, a quad or a mesh's texture coordinates, and `scale` times per unit of length on a box's faces. A mesh takes its texture coordinates as `{ uvs }`, one `Vec2` per vertex.
 
 ## Running and testing
 

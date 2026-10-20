@@ -19,6 +19,7 @@ import { newtonsCradle } from "./scenes/cradle.mjs";
 import { dna } from "./scenes/dna.mjs";
 import { dominoSpiral } from "./scenes/dominoes.mjs";
 import { lowPolyForest } from "./scenes/forest.mjs";
+import { textureGallery } from "./scenes/gallery.mjs";
 import { gems } from "./scenes/gems.mjs";
 import { glassGarden } from "./scenes/glass.mjs";
 import { lighthouse } from "./scenes/lighthouse.mjs";
@@ -60,6 +61,7 @@ export const SCENES = [
     { id: "spheres", name: "Sphere field", category: "Classics", build: sphereField },
     { id: "materials", name: "Material chart", category: "Classics", build: materialChart },
     { id: "sphereflake", name: "Sphereflake", category: "Classics", build: sphereflakeScene },
+    { id: "textures", name: "Texture gallery", category: "Classics", build: textureGallery },
     { id: "glass", name: "Glass garden", category: "Light and glass", build: glassGarden },
     { id: "pool", name: "Swimming pool", category: "Light and glass", build: swimmingPool },
     { id: "gems", name: "Gems", category: "Light and glass", build: gems },

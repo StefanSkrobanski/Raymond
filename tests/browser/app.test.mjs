@@ -59,10 +59,12 @@ after(async () => {
     server?.close();
 });
 
-// Opens a page, collecting its errors (missing favicons aside).
-async function open(path, { viewport = { width: 480, height: 320 } } = {}) {
+// Opens a page, collecting its errors (missing favicons aside). Service
+// workers are blocked unless asked for, so cached copies never stand in
+// for the files under test.
+async function open(path, { viewport = { width: 480, height: 320 }, serviceWorkers = false } = {}) {
 
-    const context = await browser.newContext({ viewport, reducedMotion: "reduce" });
+    const context = await browser.newContext({ viewport, reducedMotion: "reduce", serviceWorkers: serviceWorkers ? "allow" : "block" });
     const page = await context.newPage();
     const errors = [];
 
@@ -156,6 +158,24 @@ test("the albedo view shows each surface's colour", async () => {
         assert.deepEqual(rgb(pixels, i).map((c) => +c.toFixed(3)), [1, 0, 0]);
     for (const i of interior(hits, size, 0))
         assert.deepEqual(rgb(pixels, i).map((c) => +c.toFixed(3)), [0.5, 0.5, 0.5]);
+});
+
+test("the GPU's textures match the CPU's, on every kind of primitive", async () => {
+
+    const size = 64;
+    const { pixels, hits } = await trace("textured", { view: "albedo", spp: 1, size });
+
+    let compared = 0, wrong = 0;
+    for (const i of interior(hits, size)) {
+        compared++;
+        const gpu = rgb(pixels, i), cpu = hits[i].albedo;
+        if ([0, 1, 2].some((c) => Math.abs(gpu[c] - cpu[c]) > 0.02))
+            wrong++;
+    }
+
+    assert.ok(compared > size * size * 0.6, `most pixels see something (${compared})`);
+    // A few pixels where the grid's colours change may filter differently.
+    assert.ok(wrong <= compared * 0.01, `${wrong} of ${compared} pixels disagree`);
 });
 
 // ---- Light, against exact answers ----
@@ -502,6 +522,19 @@ test("the example page renders with the library by its package name", async () =
     const sky = shot.pixel(320, 20);
     assert.ok(sky[2] > 100, `the sky is blue: ${sky}`);
 
+    assert.deepEqual(errors, []);
+    await context.close();
+});
+
+test("the service worker registers and takes control", async () => {
+
+    const { page, errors, context } = await open("index.html", { serviceWorkers: true });
+
+    await page.evaluate(() => navigator.serviceWorker.ready);
+    await page.reload();
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: 60000 });
+
+    assert.equal(await page.evaluate(() => navigator.serviceWorker.controller !== null), true);
     assert.deepEqual(errors, []);
     await context.close();
 });

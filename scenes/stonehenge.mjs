@@ -1,5 +1,6 @@
 import { Box, Material, Quad, Scene, Sky, Vec3, hexColor } from "../src/index.mjs";
 import { seededRandom } from "./helpers.mjs";
+import { stone as stoneTexture } from "./textures.mjs";
 
 /**
  * The stones, as boxes: a ring of uprights with lintels across their tops,
@@ -8,7 +9,8 @@ import { seededRandom } from "./helpers.mjs";
 export function stones() {
 
     const random = seededRandom(5);
-    const stone = () => Material.diffuse(hexColor(random() < 0.5 ? "#8f8a7e" : "#7d786c"));
+    const tints = [hexColor("#d8d2c4"), hexColor("#c4bdb0")].map((tint) => Material.diffuse(tint).withTexture(stoneTexture(), 0.4, tint));
+    const stone = () => tints[random() < 0.5 ? 0 : 1];
     const boxes = [];
     const RING = 30, R = 5.0;
 

@@ -1,4 +1,5 @@
 import { Box, Mat4, Material, Quad, Scene, Sky, Sphere, Vec3, hexColor } from "../src/index.mjs";
+import { marble as marbleTexture } from "./textures.mjs";
 
 export const STEPS = 40;
 export const RISE = 0.18;
@@ -9,7 +10,7 @@ export const RISE = 0.18;
  */
 export function steps() {
 
-    const marble = Material.plastic(hexColor("#ece7df"), 0.25);
+    const marble = Material.plastic(hexColor("#ece7df"), 0.25).withTexture(marbleTexture(), 1, hexColor("#f4f0ea"));
     const boxes = [];
 
     for (let i = 0; i < STEPS; ++i) {

@@ -1,5 +1,6 @@
 import { Box, Mat4, Material, Mesh, Quad, Scene, Sky, Sphere, Vec3, hexColor } from "../src/index.mjs";
 import { profile } from "./helpers.mjs";
+import { plaster, wood } from "./textures.mjs";
 
 // Each vessel goes up the outside, over the rim, and down the inside to a
 // floor, so it's a closed solid that glass can fill. Heights start at 0.
@@ -29,9 +30,9 @@ export function stillLife() {
 
     scene.add(
         // The table and the walls behind.
-        Box.fromCorners(new Vec3(-2.2, 0, -1.2), new Vec3(2.2, top, 1.2), Material.plastic(hexColor("#5a3a22"), 0.4)),
+        Box.fromCorners(new Vec3(-2.2, 0, -1.2), new Vec3(2.2, top, 1.2), Material.plastic(hexColor("#5a3a22"), 0.4).withTexture(wood(), 1, hexColor("#9a7050"))),
         new Quad(new Vec3(-10, 0, 10), new Vec3(20, 0, 0), new Vec3(0, 0, -20), Material.diffuse(hexColor("#2e2a26"))),
-        new Quad(new Vec3(-10, 0, -2), new Vec3(20, 0, 0), new Vec3(0, 6, 0), Material.diffuse(hexColor("#4a4f45"))),
+        new Quad(new Vec3(-10, 0, -2), new Vec3(20, 0, 0), new Vec3(0, 6, 0), Material.diffuse(hexColor("#4a4f45")).withTexture(plaster(), 4, hexColor("#6a7064"))),
         // The window: a tall, bright panel off to the left.
         new Quad(new Vec3(-4, 0.8, 1.5), new Vec3(0, 0, -2.5), new Vec3(0, 2.8, 0), Material.light(hexColor("#fff4e0"), 12.0)),
         // A little fill from the right, so the shadows aren't black.
