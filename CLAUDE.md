@@ -67,4 +67,5 @@ On the CPU, `Scene.raycast` mirrors the shader's intersection tests and traversa
 - **Saving:** a WebGPU canvas holds its image only until the frame is presented, so the save button renders and calls `toBlob` in the same task.
 - **Errors:** a classic script in `index.html` shows the first error in `#error`, including WebGPU being unavailable or the device being lost.
 - **Theme:** `auto`/`light`/`dark` for the panels (the image is on black either way), set on `<html>` as `data-theme` before first paint, as in Styx.
+- **Home-screen app:** `manifest.json`, the `apple-mobile-web-app-*` meta tags and `viewport-fit=cover` let it run full screen from a phone's home screen; the panels keep clear of the notch with `env(safe-area-inset-*)`. The icons (`icon-512.png`, `icon-192.png`, `icon-180.png` for Apple) are rendered by Raymond itself: `tools/icon.html` holds the scene and `node tools/render-icons.mjs` renders and saves them (about 3 minutes on SwiftShader). They must be opaque, as iOS fills transparency with black.
 - **Tests' hook:** `main.mjs` puts `{ renderer, camera, controls, settings }` on `window.raymond` for the browser tests.
