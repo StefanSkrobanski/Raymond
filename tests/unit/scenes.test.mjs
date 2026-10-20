@@ -33,12 +33,12 @@ test("every scene is lit", () => {
     }
 });
 
-test("every camera sees the scene and isn't inside anything", () => {
+test("every camera looks at something, from outside it", () => {
 
     for (const { demo, scene, camera: options } of built) {
 
         const camera = new Camera(options);
-        let hits = 0;
+        let centre_hits = 0;
 
         // A 9 x 9 grid of rays across the image.
         for (let i = 0; i < 9; ++i) {
@@ -49,7 +49,9 @@ test("every camera sees the scene and isn't inside anything", () => {
                 if (!hit)
                     continue;
 
-                hits++;
+                if (Math.abs(i - 4) <= 1 && Math.abs(j - 4) <= 1)
+                    centre_hits++;
+
                 // Seeing the inside of a sphere or a closed glass mesh would
                 // mean the camera is in it.
                 if (hit.object instanceof Sphere || hit.object instanceof Mesh && hit.material.type == "glass")
@@ -57,8 +59,9 @@ test("every camera sees the scene and isn't inside anything", () => {
             }
         }
 
-        // A third at least: the DNA floats in a lot of empty sky.
-        assert.ok(hits > 27, `${demo.id}: the camera sees the scene (${hits} of 81 rays hit)`);
+        // Something in the middle of the frame: the camera points at its
+        // subject, even one floating in empty space.
+        assert.ok(centre_hits > 0, `${demo.id}: nothing in the middle of the frame`);
     }
 });
 

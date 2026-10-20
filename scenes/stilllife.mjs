@@ -1,10 +1,5 @@
-import { Box, Mat4, Material, Mesh, Quad, Scene, Sky, Sphere, Vec2, Vec3, hexColor } from "../src/index.mjs";
-
-/**
- * A profile from a list of [radius, height] pairs.
- * @param {number[][]} points
- */
-const profile = (points) => points.map(([r, y]) => new Vec2(r, y));
+import { Box, Mat4, Material, Mesh, Quad, Scene, Sky, Sphere, Vec3, hexColor } from "../src/index.mjs";
+import { profile } from "./helpers.mjs";
 
 // Each vessel goes up the outside, over the rim, and down the inside to a
 // floor, so it's a closed solid that glass can fill. Heights start at 0.
