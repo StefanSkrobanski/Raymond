@@ -228,7 +228,17 @@ function bindSlider(id, range, set) {
     });
 }
 
-bindSelect("scene", Object.fromEntries(SCENES.map((s) => [s.id, s.name])), "scene", String, () => loadScene({ changed: true }));
+// The scene picker, in groups by category; bindSelect adds no options of
+// its own, just keeps the setting in step.
+for (const category of new Set(SCENES.map((s) => s.category))) {
+    const group = document.createElement("optgroup");
+    group.label = category;
+    for (const s of SCENES.filter((s) => s.category == category))
+        group.append(new Option(s.name, s.id));
+    $("scene").append(group);
+}
+
+bindSelect("scene", {}, "scene", String, () => loadScene({ changed: true }));
 bindSelect("view-mode", VIEWS, "view", String);
 bindSelect("resolution", RESOLUTIONS, "resolution", Number);
 bindSelect("sample-limit", SAMPLE_LIMITS, "sample_limit", Number);
