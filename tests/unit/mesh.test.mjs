@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Mat4, Material, Mesh, Vec3 } from "../../src/index.mjs";
+import { Mat4, Material, Mesh, Vec2, Vec3 } from "../../src/index.mjs";
 import { assertClose } from "./helpers.mjs";
 
 const WHITE = Material.diffuse(new Vec3(0.8, 0.8, 0.8));
@@ -144,4 +144,19 @@ test("bad meshes are refused", () => {
     assert.throws(() => new Mesh(p, [0, 1], WHITE), RangeError, "not a multiple of 3");
     assert.throws(() => new Mesh(p, [0, 1, 3], WHITE), RangeError, "no vertex 3");
     assert.throws(() => new Mesh(p, [0, 1, 2], WHITE, { normals: [new Vec3(0, 0, 1)] }), RangeError, "too few normals");
+});
+
+test("a lathe turns a profile into a solid that winds outwards", () => {
+
+    // A cylinder of radius 1 and height 2, closed at both ends.
+    const profile = [new Vec2(0, 0), new Vec2(1, 0), new Vec2(1, 2), new Vec2(0, 2)];
+    const cylinder = Mesh.lathe(profile, WHITE, { segments: 256 });
+
+    assertClose(signedVolume(cylinder), 2.0 * Math.PI, "volume", 0.001);
+
+    // The profile's points come round at their radii and heights.
+    for (const p of cylinder.positions)
+        assert.ok([0, 2].includes(Math.round(p.y * 1e9) / 1e9) && [0, 1].some((r) => Math.abs(Math.hypot(p.x, p.z) - r) < 1e-9));
+
+    assert.throws(() => Mesh.lathe([new Vec2(1, 0)], WHITE), RangeError);
 });

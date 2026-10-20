@@ -104,7 +104,8 @@ export function mengerScene() {
     scene.add(
         sponge.transformed(Mat4.translate(0.0, 1.2, 0.0)),
         floor(60, Material.diffuse(hexColor("#7d8a96"))),
-        new Quad(new Vec3(-2.5, 3.0, -2.5), new Vec3(1.2, 0.0, 0.0), new Vec3(0.0, 0.0, 1.2), Material.light(hexColor("#ff9a50"), 6.0)));
+        // A warm lamp above and behind the camera, out of shot.
+        new Quad(new Vec3(3.0, 6.5, 4.0), new Vec3(1.5, 0.0, 0.0), new Vec3(0.0, 0.0, 1.5), Material.light(hexColor("#ff9a50"), 5.0)));
 
     return {
         scene,

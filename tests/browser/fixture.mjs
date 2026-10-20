@@ -76,6 +76,18 @@ const SCENES = {
         camera: LOOK_DOWN,
     }),
 
+    // A lit room with a checkered floor, for the denoiser: soft shadows to
+    // smooth, and edges and texture to keep.
+    room: () => ({
+        scene: new Scene({ sky: Sky.black() }).add(
+            floor(Material.checkered(new Vec3(0.8, 0.8, 0.8), new Vec3(0.15, 0.15, 0.15), 0.5)),
+            new Quad(new Vec3(-2, 0, -2), new Vec3(4, 0, 0), new Vec3(0, 3, 0), Material.diffuse(new Vec3(0.7, 0.3, 0.2))),
+            new Sphere(new Vec3(-0.6, 0.5, -0.4), 0.5, Material.diffuse(new Vec3(0.3, 0.6, 0.9))),
+            Box.fromCorners(new Vec3(0.2, 0, -0.8), new Vec3(1.0, 0.8, 0.0), Material.plastic(new Vec3(0.9, 0.9, 0.9), 0.3), 0.4),
+            new Quad(new Vec3(-0.6, 2.5, -0.6), new Vec3(1.2, 0, 0), new Vec3(0, 0, 1.2), Material.light(new Vec3(1, 1, 1), 4.0))),
+        camera: { position: new Vec3(0.5, 2.2, 3.2), target: new Vec3(0, 0.4, -0.5), fov: Math.PI / 3 },
+    }),
+
     lightAsMesh: (material) => ({
         scene: new Scene({ sky: Sky.black() }).add(
             floor(MATERIALS[material]),
@@ -97,11 +109,12 @@ let renderer;
 /**
  * Renders a scene and returns { pixels, hits }: pixels is the GPU's
  * average, 4 floats per pixel; hits holds, for each pixel, what the CPU
- * raycast through its centre found (null for nothing).
+ * raycast through its centre found (null for nothing). With denoise, it
+ * also returns the denoised pixels.
  * @param {string} name
- * @param {{ arg?: string, spp?: number, bounces?: number, view?: import("../../src/Renderer.mjs").View, size?: number }} options
+ * @param {{ arg?: string, spp?: number, bounces?: number, view?: import("../../src/Renderer.mjs").View, size?: number, denoise?: boolean }} options
  */
-async function trace(name, { arg, spp = 16, bounces = 8, view = "color", size = 48 } = {}) {
+async function trace(name, { arg, spp = 16, bounces = 8, view = "color", size = 48, denoise = false } = {}) {
 
     const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById("canvas"));
     canvas.width = size;
@@ -118,12 +131,14 @@ async function trace(name, { arg, spp = 16, bounces = 8, view = "color", size = 
     renderer.maxBounces = bounces;
     renderer.fireflyClamp = 0;
     renderer.samplesPerFrame = Math.min(spp, 16);
+    renderer.denoise = denoise;
     renderer.reset();
 
     while (renderer.samples < spp)
         renderer.render();
 
     const pixels = Array.from(await renderer.readPixels());
+    const denoised = denoise ? Array.from(await renderer.readPixels({ denoised: true })) : null;
 
     const hits = [];
     for (let y = 0; y < size; ++y) {
@@ -139,7 +154,7 @@ async function trace(name, { arg, spp = 16, bounces = 8, view = "color", size = 
         }
     }
 
-    return { pixels, hits, samples: renderer.samples };
+    return { pixels, denoised, hits, samples: renderer.samples };
 }
 
 Object.assign(window, { trace, ready: true });

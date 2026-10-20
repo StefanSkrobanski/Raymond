@@ -1,4 +1,4 @@
-import { DISPLAY_SHADER, TRACE_SHADER } from "./shaders.mjs";
+import { DENOISE_SHADER, DISPLAY_SHADER, TRACE_SHADER } from "./shaders.mjs";
 /** @import { Camera } from "./Camera.mjs" */
 /** @import { Scene } from "./Scene.mjs" */
 
@@ -22,6 +22,10 @@ const BUFFER_STORAGE = 0x0080;
 const MAP_READ = 0x0001;
 
 const PARAMS_BYTES = 192;
+// The denoiser's à-trous passes, each spreading twice as far as the last.
+const ATROUS_STEPS = [1, 2, 4, 8, 16];
+const STORAGE_READ = /** @type {GPUBufferBindingType} */ ("read-only-storage");
+const COMPUTE_STAGE = 0x4;
 // The part of the uniforms that decides the image: see shaders.mjs.
 const IMAGE_KEY_BYTES = 168;
 
@@ -31,7 +35,8 @@ const IMAGE_KEY_BYTES = 168;
  * noisy and clears up. Anything that changes the image (the scene's
  * objects, sky, the camera, the canvas size, maxBounces, the view and so
  * on) is noticed on the next render(), which starts the average again.
- * Exposure only changes how the average is shown, so it doesn't.
+ * Exposure and denoising only change how the average is shown, so they
+ * don't.
  *
  * The image is canvas.width × canvas.height pixels; the canvas's CSS size
  * can differ, to render at a lower resolution and scale up.
@@ -45,7 +50,10 @@ export class Renderer {
 
     #trace_pipeline;
     #display_pipeline;
+    #denoise_pipelines;
     #params_buffer;
+    // One small uniform buffer per denoising pass, holding its step.
+    #pass_buffers;
 
     /** @type {Scene | null} */
     #scene = null;
@@ -58,6 +66,7 @@ export class Renderer {
     #firefly_clamp = 20.0;
     /** @type {View} */
     #view = "color";
+    #denoise = true;
 
     #samples = 0;
     #params = new ArrayBuffer(PARAMS_BYTES);
@@ -71,8 +80,12 @@ export class Renderer {
     #uploaded_version = -1;
     #light_count = 0;
 
+    // Per pixel: the accumulated colour, the denoiser's guides, two
+    // buffers it filters back and forth between, and its result.
     /** @type {GPUBuffer | null} */
     #accum = null;
+    /** @type {GPUBuffer[]} */
+    #pixel_buffers = [];
     #width = 0;
     #height = 0;
 
@@ -80,6 +93,8 @@ export class Renderer {
     #trace_group = null;
     /** @type {GPUBindGroup | null} */
     #display_group = null;
+    /** @type {GPUBindGroup[]} */
+    #denoise_groups = [];
 
     /**
      * Use Renderer.create() rather than calling this directly.
@@ -89,8 +104,9 @@ export class Renderer {
      * @param {GPUTextureFormat} format
      * @param {GPUComputePipeline} trace_pipeline
      * @param {GPURenderPipeline} display_pipeline
+     * @param {{ prepare: GPUComputePipeline, atrous: GPUComputePipeline, compose: GPUComputePipeline }} denoise_pipelines
      */
-    constructor(device, canvas, context, format, trace_pipeline, display_pipeline) {
+    constructor(device, canvas, context, format, trace_pipeline, display_pipeline, denoise_pipelines) {
 
         this.#device = device;
         this.#canvas = canvas;
@@ -98,11 +114,19 @@ export class Renderer {
         this.#format = format;
         this.#trace_pipeline = trace_pipeline;
         this.#display_pipeline = display_pipeline;
+        this.#denoise_pipelines = denoise_pipelines;
 
         this.#params_buffer = device.createBuffer({
             label: "params",
             size: PARAMS_BYTES,
             usage: BUFFER_UNIFORM | BUFFER_COPY_DST,
+        });
+
+        // prepare, the à-trous passes, then compose.
+        this.#pass_buffers = [0, ...ATROUS_STEPS, 0].map((step) => {
+            const buffer = device.createBuffer({ label: "denoise pass", size: 16, usage: BUFFER_UNIFORM | BUFFER_COPY_DST });
+            device.queue.writeBuffer(buffer, 0, new Uint32Array([step, 0, 0, 0]));
+            return buffer;
         });
     }
 
@@ -137,12 +161,13 @@ export class Renderer {
         const format = gpu.getPreferredCanvasFormat();
         context.configure({ device, format, alphaMode: "opaque" });
 
-        const [trace_pipeline, display_pipeline] = await Promise.all([
+        const [trace_pipeline, display_pipeline, denoise_pipelines] = await Promise.all([
             Renderer.#computePipeline(device, TRACE_SHADER),
             Renderer.#renderPipeline(device, DISPLAY_SHADER, format),
+            Renderer.#denoisePipelines(device),
         ]);
 
-        return new Renderer(device, canvas, context, format, trace_pipeline, display_pipeline);
+        return new Renderer(device, canvas, context, format, trace_pipeline, display_pipeline, denoise_pipelines);
     }
 
     get device() {
@@ -225,6 +250,20 @@ export class Renderer {
         this.#view = value;
     }
 
+    /**
+     * Whether to show the image denoised: smoothed where it's still noisy,
+     * guided by each pixel's surface so edges and textures stay sharp. The
+     * smoothing fades as samples build up, so it converges to the same
+     * image either way.
+     */
+    get denoise() {
+        return this.#denoise;
+    }
+
+    set denoise(value) {
+        this.#denoise = value;
+    }
+
     /** Paths per pixel averaged so far. */
     get samples() {
         return this.#samples;
@@ -263,6 +302,17 @@ export class Renderer {
         compute.setPipeline(this.#trace_pipeline);
         compute.setBindGroup(0, this.#trace_group);
         compute.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
+
+        if (this.#denoising()) {
+            const { prepare, atrous, compose } = this.#denoise_pipelines;
+            const pipelines = [prepare, ...ATROUS_STEPS.map(() => atrous), compose];
+            pipelines.forEach((pipeline, i) => {
+                compute.setPipeline(pipeline);
+                compute.setBindGroup(0, this.#denoise_groups[i]);
+                compute.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
+            });
+        }
+
         compute.end();
 
         const pass = encoder.beginRenderPass({
@@ -283,21 +333,26 @@ export class Renderer {
     }
 
     /**
-     * Reads back the average so far: 4 floats per pixel (red, green, blue
-     * and 0), row by row from the top left, in linear light before
-     * exposure. For the albedo and normal views it's the colour or normal;
-     * for depth, the distance (0 where nothing was hit).
+     * Reads back the average so far: 4 floats per pixel (red, green, blue,
+     * then a value to ignore), row by row from the top left, in linear
+     * light before exposure. For the albedo and normal views it's the
+     * colour or normal; for depth, the distance (0 where nothing was hit).
+     * With denoised, it's the denoised colour, as last shown (which needs
+     * denoise on and the color view).
+     * @param {{ denoised?: boolean }} [options]
      */
-    async readPixels() {
+    async readPixels({ denoised = false } = {}) {
 
         if (!this.#accum || this.#samples == 0)
             throw new Error("Nothing has been rendered yet.");
+        if (denoised && !this.#denoising())
+            throw new Error("Only the color view is denoised, with denoise on.");
 
         const size = this.#width * this.#height * 16;
         const staging = this.#device.createBuffer({ size, usage: BUFFER_MAP_READ | BUFFER_COPY_DST });
 
         const encoder = this.#device.createCommandEncoder();
-        encoder.copyBufferToBuffer(this.#accum, 0, staging, 0, size);
+        encoder.copyBufferToBuffer(denoised ? this.#pixel_buffers[4] : this.#accum, 0, staging, 0, size);
         this.#device.queue.submit([encoder.finish()]);
 
         const samples = this.#samples;
@@ -305,8 +360,11 @@ export class Renderer {
         const pixels = new Float32Array(staging.getMappedRange().slice(0));
         staging.destroy();
 
-        for (let i = 0; i < pixels.length; ++i)
-            pixels[i] /= samples;
+        // The denoised result is already an average.
+        if (!denoised) {
+            for (let i = 0; i < pixels.length; ++i)
+                pixels[i] /= samples;
+        }
 
         return pixels;
     }
@@ -315,6 +373,8 @@ export class Renderer {
     dispose() {
 
         for (const buffer of this.#scene_buffers)
+            buffer.destroy();
+        for (const buffer of [...this.#pixel_buffers, ...this.#pass_buffers])
             buffer.destroy();
         this.#accum?.destroy();
         this.#params_buffer.destroy();
@@ -369,11 +429,18 @@ export class Renderer {
     #resize(width, height) {
 
         this.#accum?.destroy();
-        this.#accum = this.#device.createBuffer({
-            label: "accumulation",
+        for (const buffer of this.#pixel_buffers)
+            buffer.destroy();
+
+        /** @param {string} label */
+        const pixels = (label) => this.#device.createBuffer({
+            label,
             size: width * height * 16,
             usage: BUFFER_STORAGE | BUFFER_COPY_SRC,
         });
+
+        this.#accum = pixels("accumulation");
+        this.#pixel_buffers = ["guide albedo", "guide normal", "light a", "light b", "denoised"].map(pixels);
 
         this.#width = width;
         this.#height = height;
@@ -385,6 +452,7 @@ export class Renderer {
 
         const accum = /** @type {GPUBuffer} */ (this.#accum);
         const [primitives, nodes, materials, normals, lights] = this.#scene_buffers;
+        const [guide_albedo, guide_normal, light_a, light_b, denoised] = this.#pixel_buffers;
 
         this.#trace_group = this.#device.createBindGroup({
             layout: this.#trace_pipeline.getBindGroupLayout(0),
@@ -396,6 +464,8 @@ export class Renderer {
                 { binding: 4, resource: { buffer: normals } },
                 { binding: 5, resource: { buffer: lights } },
                 { binding: 6, resource: { buffer: accum } },
+                { binding: 7, resource: { buffer: guide_albedo } },
+                { binding: 8, resource: { buffer: guide_normal } },
             ],
         });
 
@@ -404,8 +474,34 @@ export class Renderer {
             entries: [
                 { binding: 0, resource: { buffer: this.#params_buffer } },
                 { binding: 1, resource: { buffer: accum } },
+                { binding: 2, resource: { buffer: denoised } },
             ],
         });
+
+        // Each pass reads one buffer and writes another: prepare fills
+        // light a, the à-trous passes go back and forth, and compose writes
+        // the result.
+        /** @type {[GPUBuffer, GPUBuffer][]} */
+        const flows = [[light_b, light_a]];
+        ATROUS_STEPS.forEach((_, i) => flows.push(i % 2 == 0 ? [light_a, light_b] : [light_b, light_a]));
+        flows.push([flows[flows.length - 1][1], denoised]);
+
+        this.#denoise_groups = flows.map(([from, to], i) => this.#device.createBindGroup({
+            layout: this.#denoise_pipelines.prepare.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this.#params_buffer } },
+                { binding: 1, resource: { buffer: this.#pass_buffers[i] } },
+                { binding: 2, resource: { buffer: accum } },
+                { binding: 3, resource: { buffer: guide_albedo } },
+                { binding: 4, resource: { buffer: guide_normal } },
+                { binding: 5, resource: { buffer: from } },
+                { binding: 6, resource: { buffer: to } },
+            ],
+        }));
+    }
+
+    #denoising() {
+        return this.#denoise && this.#view == "color";
     }
 
     /**
@@ -460,6 +556,7 @@ export class Renderer {
         u[43] = this.#samples_per_frame;
         u[44] = this.#samples + this.#samples_per_frame;
         f[45] = this.#exposure;
+        u[46] = this.#denoising() ? 1 : 0;
 
         this.#device.queue.writeBuffer(this.#params_buffer, 0, this.#params);
     }
@@ -495,6 +592,33 @@ export class Renderer {
             fragment: { module, entryPoint: "fragment", targets: [{ format }] },
             primitive: { topology: "triangle-list" },
         });
+    }
+
+    // The denoiser's three pipelines share one layout, so their bind groups
+    // are interchangeable.
+    /** @param {GPUDevice} device */
+    static async #denoisePipelines(device) {
+
+        const module = await Renderer.#shaderModule(device, DENOISE_SHADER, "denoise");
+
+        let binding = 0;
+        /** @type {(type: GPUBufferBindingType) => GPUBindGroupLayoutEntry} */
+        const entry = (type) => ({ binding: binding++, visibility: COMPUTE_STAGE, buffer: { type } });
+
+        const layout = device.createPipelineLayout({
+            bindGroupLayouts: [device.createBindGroupLayout({
+                entries: [
+                    entry("uniform"), entry("uniform"),
+                    entry(STORAGE_READ), entry(STORAGE_READ), entry(STORAGE_READ), entry(STORAGE_READ),
+                    entry("storage"),
+                ],
+            })],
+        });
+
+        const [prepare, atrous, compose] = await Promise.all(["prepare", "atrous", "compose"].map((entryPoint) =>
+            device.createComputePipelineAsync({ label: `denoise ${entryPoint}`, layout, compute: { module, entryPoint } })));
+
+        return { prepare, atrous, compose };
     }
 
     // Compiles a shader, turning compilation errors into an exception

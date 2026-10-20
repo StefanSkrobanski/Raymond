@@ -2,9 +2,9 @@
 // with the library wherever it's served or bundled. Not part of the public
 // API.
 //
-// Uniform layout, shared by both shaders and written by Renderer: 12 rows
-// of 16 bytes. The first 168 bytes (rows 0-9 and width, height) decide the
-// image; if they change, the accumulated samples are thrown away.
+// Uniform layout, shared by all the shaders and written by Renderer: 12
+// rows of 16 bytes. The first 168 bytes (rows 0-9 and width, height) decide
+// the image; if they change, the accumulated samples are thrown away.
 
 const PARAMS = /* wgsl */ `
 struct Params {
@@ -19,7 +19,7 @@ struct Params {
     sun_radiance: vec3f, max_bounces: u32,
     view: u32, _pad0: u32, _pad1: u32, _pad2: u32,
     width: u32, height: u32, sample_offset: u32, samples_per_frame: u32,
-    total_samples: u32, exposure: f32, _pad3: u32, _pad4: u32,
+    total_samples: u32, exposure: f32, denoise: u32, _pad4: u32,
 }
 
 const VIEW_COLOR = 0u;
@@ -69,7 +69,12 @@ struct Material {
 @group(0) @binding(3) var<storage, read> materials: array<Material>;
 @group(0) @binding(4) var<storage, read> normals: array<vec4f>;
 @group(0) @binding(5) var<storage, read> lights: array<u32>;
+// Per pixel, summed over samples: the colour, with the luminance squared in
+// w (for the noise estimate); and the denoiser's guides, the albedo and
+// the normal (w: the distance) of the first surface that isn't a mirror.
 @group(0) @binding(6) var<storage, read_write> accum: array<vec4f>;
+@group(0) @binding(7) var<storage, read_write> guide_albedo: array<vec4f>;
+@group(0) @binding(8) var<storage, read_write> guide_normal: array<vec4f>;
 
 // ---- Random numbers: PCG ----
 
@@ -688,8 +693,17 @@ fn camera_ray(px: vec2f, jitter: bool) -> array<vec3f, 2> {
     return array<vec3f, 2>(origin, normalize(focus - origin));
 }
 
+// What radiance() saw first, for the denoiser.
+var<private> g_albedo: vec3f;
+var<private> g_normal: vec4f;
+
 // One sample of the light reaching the camera through pixel position px.
 fn radiance(px: vec2f) -> vec3f {
+
+    g_albedo = vec3f(1.0);
+    g_normal = vec4f(0.0);
+    var guided = false;
+    var travelled = 0.0;
 
     let ray = camera_ray(px, true);
     var o = ray[0];
@@ -707,6 +721,9 @@ fn radiance(px: vec2f) -> vec3f {
         let hit = trace(o, d, INF, false);
 
         if (hit.prim == NONE) {
+            if (!guided) {
+                g_albedo = throughput;
+            }
             result += throughput * sky(d);
             if (in_sun(d)) {
                 var w = 1.0;
@@ -720,6 +737,16 @@ fn radiance(px: vec2f) -> vec3f {
 
         let s = surface(o, d, hit);
         let m = materials[s.material];
+        travelled += hit.t;
+
+        // The guides come from the first surface that isn't a mirror or
+        // glass, seen through any that are, so reflections keep their
+        // edges.
+        if (!guided && (m.kind == LIGHT || !is_delta(m) || depth == params.max_bounces)) {
+            guided = true;
+            g_albedo = throughput * select(albedo(m, s.p), vec3f(1.0), m.kind == LIGHT);
+            g_normal = vec4f(s.n, travelled);
+        }
 
         if (m.kind == LIGHT) {
             if (s.front) {
@@ -825,13 +852,17 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     }
 
     let index = id.y * params.width + id.x;
-    var sum = vec3f(0.0);
+    var sum = vec4f(0.0);
+    var sum_albedo = vec3f(0.0);
+    var sum_normal = vec4f(0.0);
 
     for (var k = 0u; k < params.samples_per_frame; k++) {
 
         rng_state = pcg(index ^ pcg(params.sample_offset + k));
 
         var c: vec3f;
+        g_albedo = vec3f(0.0);
+        g_normal = vec4f(0.0);
         if (params.view == VIEW_COLOR) {
             c = radiance(vec2f(id.xy) + vec2f(rand(), rand()));
             let peak = max(c.x, max(c.y, c.z));
@@ -843,17 +874,228 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
             c = inspect(vec2f(id.xy) + 0.5);
         }
 
-        if (finite(c)) {
-            sum += c;
+        // A path whose weight overflowed is dropped, guides and all: one
+        // NaN in a guide would spread through the denoiser.
+        if (finite(c) && finite(g_albedo) && finite(g_normal.xyz) && finite(vec3f(g_normal.w))) {
+            let l = luminance(c);
+            sum += vec4f(c, l * l);
+            sum_albedo += g_albedo;
+            sum_normal += g_normal;
         }
     }
 
     if (params.sample_offset == 0u) {
-        accum[index] = vec4f(sum, 0.0);
+        accum[index] = sum;
+        guide_albedo[index] = vec4f(sum_albedo, 0.0);
+        guide_normal[index] = sum_normal;
     }
     else {
-        accum[index] += vec4f(sum, 0.0);
+        accum[index] += sum;
+        guide_albedo[index] += vec4f(sum_albedo, 0.0);
+        guide_normal[index] += sum_normal;
     }
+}
+
+fn luminance(c: vec3f) -> f32 {
+    return dot(c, vec3f(0.2126, 0.7152, 0.0722));
+}
+`;
+
+/**
+ * Denoises the average so far, in three entry points run in turn:
+ * prepare, then atrous five times with steps 1, 2, 4, 8 and 16, then
+ * compose.
+ *
+ * It's an edge-avoiding à-trous wavelet filter (Dammertz et al., 2010),
+ * steered by an estimate of each pixel's noise as in SVGF (Schied et al.,
+ * 2017). It filters the light arriving at each surface (the colour divided
+ * by the albedo), so textures stay sharp, and only blends pixels whose
+ * normals and distances match, so edges do too. Neighbours count less the
+ * more their brightness differs, measured against the noise; as samples
+ * build up the noise falls, the filter backs off, and the image converges
+ * to the plain average.
+ */
+export const DENOISE_SHADER = PARAMS + /* wgsl */ `
+struct Pass {
+    step: u32, _p0: u32, _p1: u32, _p2: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<uniform> pass_params: Pass;
+@group(0) @binding(2) var<storage, read> accum: array<vec4f>;
+@group(0) @binding(3) var<storage, read> guide_albedo: array<vec4f>;
+@group(0) @binding(4) var<storage, read> guide_normal: array<vec4f>;
+// Light at each surface (rgb) and the variance of its luminance (w).
+@group(0) @binding(5) var<storage, read> light_in: array<vec4f>;
+@group(0) @binding(6) var<storage, read_write> light_out: array<vec4f>;
+
+// The B3 spline's weights at offsets 0, 1 and 2.
+const KERNEL = array<f32, 3>(0.375, 0.25, 0.0625);
+
+fn luminance(c: vec3f) -> f32 {
+    return dot(c, vec3f(0.2126, 0.7152, 0.0722));
+}
+
+fn samples() -> f32 {
+    return f32(max(params.total_samples, 1u));
+}
+
+fn albedo_at(i: u32) -> vec3f {
+    return max(guide_albedo[i].rgb / samples(), vec3f(0.01));
+}
+
+// The average normal, and the average distance (0 where the sky was hit).
+fn normal_at(i: u32) -> vec4f {
+    let g = guide_normal[i];
+    let n = select(vec3f(0.0), normalize(g.xyz), dot(g.xyz, g.xyz) > 0.0);
+    return vec4f(n, g.w / samples());
+}
+
+fn light_at(i: u32) -> vec3f {
+    return accum[i].rgb / samples() / albedo_at(i);
+}
+
+// How much a neighbour's guides let it count: alike normals and distances.
+// Sky pixels only mix with each other.
+fn similarity(p: vec4f, q: vec4f, step: f32) -> f32 {
+    if (p.w <= 0.0 || q.w <= 0.0) {
+        return select(0.0, 1.0, p.w <= 0.0 && q.w <= 0.0);
+    }
+    if (dot(p.xyz, p.xyz) == 0.0) {
+        return 0.0;
+    }
+    let wn = pow(max(dot(p.xyz, q.xyz), 0.0), 64.0);
+    let wz = exp(-abs(p.w - q.w) / (p.w * 0.02 * step + 1e-6));
+    return wn * wz;
+}
+
+fn inside(x: i32, y: i32) -> bool {
+    return x >= 0 && y >= 0 && x < i32(params.width) && y < i32(params.height);
+}
+
+@compute @workgroup_size(8, 8)
+fn prepare(@builtin(global_invocation_id) id: vec3u) {
+
+    if (id.x >= params.width || id.y >= params.height) {
+        return;
+    }
+
+    let i = id.y * params.width + id.x;
+    let n = samples();
+    let light = light_at(i);
+    let gp = normal_at(i);
+    let a = luminance(albedo_at(i));
+
+    var variance: f32;
+    if (n >= 4.0) {
+        // From the samples themselves: the variance of one sample's
+        // luminance, over n for the variance of their mean, in the units
+        // of light at the surface.
+        let mean = luminance(accum[i].rgb) / n;
+        let spread = max(accum[i].w / n - mean * mean, 0.0) * n / (n - 1.0);
+        variance = spread / n / (a * a);
+    }
+    else {
+        // Too few samples to tell: use how much alike neighbours differ.
+        var sum = 0.0;
+        var sum2 = 0.0;
+        var weight = 0.0;
+        for (var dy = -2; dy <= 2; dy++) {
+            for (var dx = -2; dx <= 2; dx++) {
+                let x = i32(id.x) + dx;
+                let y = i32(id.y) + dy;
+                if (!inside(x, y)) {
+                    continue;
+                }
+                let j = u32(y) * params.width + u32(x);
+                let w = similarity(gp, normal_at(j), 1.0);
+                let l = luminance(light_at(j));
+                sum += w * l;
+                sum2 += w * l * l;
+                weight += w;
+            }
+        }
+        let mean = sum / max(weight, 1e-6);
+        variance = max(sum2 / max(weight, 1e-6) - mean * mean, 0.0) + 0.01 * mean * mean;
+    }
+
+    light_out[i] = vec4f(light, variance);
+}
+
+@compute @workgroup_size(8, 8)
+fn atrous(@builtin(global_invocation_id) id: vec3u) {
+
+    if (id.x >= params.width || id.y >= params.height) {
+        return;
+    }
+
+    let i = id.y * params.width + id.x;
+    let step = i32(pass_params.step);
+    let centre = light_in[i];
+    let gp = normal_at(i);
+    let lp = luminance(centre.rgb);
+
+    // The noise, blurred over the nearest pixels: a pixel whose few
+    // samples happened to agree (all dark, say) would otherwise seem
+    // noiseless and refuse every neighbour, leaving a speck.
+    var variance = 0.0;
+    var variance_weight = 0.0;
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let x = i32(id.x) + dx;
+            let y = i32(id.y) + dy;
+            if (inside(x, y)) {
+                let w = KERNEL[abs(dx)] * KERNEL[abs(dy)];
+                variance += w * light_in[u32(y) * params.width + u32(x)].w;
+                variance_weight += w;
+            }
+        }
+    }
+    let sigma = 4.0 * sqrt(variance / variance_weight) + 1e-4;
+
+    var sum = vec3f(0.0);
+    var sum_variance = 0.0;
+    var weight = 0.0;
+
+    for (var dy = -2; dy <= 2; dy++) {
+        for (var dx = -2; dx <= 2; dx++) {
+
+            let x = i32(id.x) + dx * step;
+            let y = i32(id.y) + dy * step;
+            if (!inside(x, y)) {
+                continue;
+            }
+
+            let j = u32(y) * params.width + u32(x);
+            let q = light_in[j];
+            let w = KERNEL[abs(dx)] * KERNEL[abs(dy)] *
+                similarity(gp, normal_at(j), f32(step)) *
+                exp(-abs(lp - luminance(q.rgb)) / sigma);
+
+            sum += w * q.rgb;
+            sum_variance += w * w * q.w;
+            weight += w;
+        }
+    }
+
+    // The centre counts unless its normal is unknown, so check anyway.
+    if (weight > 0.0) {
+        light_out[i] = vec4f(sum / weight, sum_variance / (weight * weight));
+    }
+    else {
+        light_out[i] = centre;
+    }
+}
+
+@compute @workgroup_size(8, 8)
+fn compose(@builtin(global_invocation_id) id: vec3u) {
+
+    if (id.x >= params.width || id.y >= params.height) {
+        return;
+    }
+
+    let i = id.y * params.width + id.x;
+    light_out[i] = vec4f(light_in[i].rgb * albedo_at(i), 0.0);
 }
 `;
 
@@ -861,6 +1103,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 export const DISPLAY_SHADER = PARAMS + /* wgsl */ `
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> accum: array<vec4f>;
+// The denoised average, when params.denoise is set.
+@group(0) @binding(2) var<storage, read> denoised: array<vec4f>;
 
 @vertex
 fn vertex(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
@@ -887,11 +1131,13 @@ fn fragment(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         return vec4f(0.0, 0.0, 0.0, 1.0);
     }
 
-    let c = accum[px.y * params.width + px.x].rgb / f32(params.total_samples);
+    let i = px.y * params.width + px.x;
+    let c = accum[i].rgb / f32(params.total_samples);
 
     switch params.view {
         case 0u: {
-            return vec4f(to_srgb(aces(c * params.exposure)), 1.0);
+            let shown = select(c, denoised[i].rgb, params.denoise != 0u);
+            return vec4f(to_srgb(aces(shown * params.exposure)), 1.0);
         }
         case 1u: {
             return vec4f(to_srgb(c), 1.0);

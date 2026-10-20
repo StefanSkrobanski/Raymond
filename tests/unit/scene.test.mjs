@@ -284,3 +284,29 @@ test("bounds hold every object", () => {
     assert.ok(max.x >= 6 && max.y >= 1 && max.z >= 1);
     assert.ok(min.x > -3.01 && max.x < 6.01, "and not much more");
 });
+
+test("a stick runs from one point to the other, as thick as asked", () => {
+
+    const a = new Vec3(1, 2, 3), b = new Vec3(-2, 4, 0);
+    const stick = Box.between(a, b, 0.2, WHITE);
+    const scene = new Scene().add(stick);
+    const along = b.subtract(a).normalized();
+
+    // A ray along the stick's axis, from beyond a, enters at a.
+    const hit = scene.raycast(a.subtract(along), along);
+    assertClose(hit.distance, 1.0, "enters at a", 1e-5);
+    assertVecClose(hit.normal, along.negate());
+
+    // Across the middle, square on to a face, it's 0.2 thick.
+    const middle = a.add(b).scale(0.5);
+    const column = stick.transform.column(0);
+    const across = new Vec3(column.x, column.y, column.z).normalized();
+    assertClose(across.dot(along), 0, "the face is across the stick", 1e-9);
+    const side = scene.raycast(middle.add(across.scale(5)), across.negate());
+    assertClose(side.distance, 5 - 0.1, "half the thickness from the axis", 1e-5);
+
+    // And it works pointing straight up, too.
+    assert.ok(new Scene().add(Box.between(new Vec3(0, 0, 0), new Vec3(0, 3, 0), 0.1, WHITE))
+        .raycast(new Vec3(0, 10, 0), new Vec3(0, -1, 0)).distance - 7 < 1e-5);
+    assert.throws(() => Box.between(a, a, 0.1, WHITE), RangeError);
+});

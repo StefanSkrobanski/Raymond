@@ -38,9 +38,12 @@
         renderer.scene = scene;
         renderer.camera = camera;
 
-        // Keep adding samples until the image has cleared up.
-        function frame() {
+        // Keep adding samples until the image has cleared up. Waiting for
+        // the GPU to finish each frame before asking for the next keeps a
+        // slow GPU from falling behind, so the page stays responsive.
+        async function frame() {
             renderer.render();
+            await renderer.device.queue.onSubmittedWorkDone();
             if (renderer.samples < 512)
                 requestAnimationFrame(frame);
         }

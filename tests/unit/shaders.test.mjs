@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { BVH, MATERIAL_TYPES, PRIMITIVE_KINDS } from "../../src/index.mjs";
-import { DISPLAY_SHADER, TRACE_SHADER } from "../../src/shaders.mjs";
+import { DENOISE_SHADER, DISPLAY_SHADER, TRACE_SHADER } from "../../src/shaders.mjs";
 
 // WGSL's sizes and alignments for the types the shaders' structs use.
 const TYPES = {
@@ -46,14 +46,15 @@ test("Renderer writes each uniform where the shader reads it", () => {
     const { size, offsets } = layout(TRACE_SHADER, "Params");
 
     assert.equal(size, 192);
-    assert.deepEqual(layout(DISPLAY_SHADER, "Params"), { size, offsets }, "both shaders agree");
+    assert.deepEqual(layout(DISPLAY_SHADER, "Params"), { size, offsets }, "the shaders agree");
+    assert.deepEqual(layout(DENOISE_SHADER, "Params"), { size, offsets }, "the shaders agree");
 
     // The float or u32 index Renderer.#writeParams uses for each field.
     const written = {
         cam_pos: 0, lens_radius: 3, cam_right: 4, tan_half_fov: 7, cam_up: 8, focus_distance: 11,
         cam_forward: 12, aspect: 15, sky_zenith: 16, sun_omc: 19, sky_horizon: 20, sun_on: 23,
         sky_ground: 24, firefly_clamp: 27, sun_dir: 28, light_count: 31, sun_radiance: 32, max_bounces: 35,
-        view: 36, width: 40, height: 41, sample_offset: 42, samples_per_frame: 43, total_samples: 44, exposure: 45,
+        view: 36, width: 40, height: 41, sample_offset: 42, samples_per_frame: 43, total_samples: 44, exposure: 45, denoise: 46,
     };
 
     for (const [field, index] of Object.entries(written))
@@ -63,7 +64,7 @@ test("Renderer writes each uniform where the shader reads it", () => {
     // decide whether to start again; the per-frame fields come after.
     for (const field of ["view", "width", "height", "max_bounces", "firefly_clamp", "lens_radius"])
         assert.ok(offsets[field] < 168, `${field} restarts the image`);
-    for (const field of ["sample_offset", "samples_per_frame", "total_samples", "exposure"])
+    for (const field of ["sample_offset", "samples_per_frame", "total_samples", "exposure", "denoise"])
         assert.ok(offsets[field] >= 168, `${field} doesn't`);
 });
 

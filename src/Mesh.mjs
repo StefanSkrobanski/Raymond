@@ -197,6 +197,34 @@ export class Mesh {
     }
 
     /**
+     * A solid of revolution, as turned on a lathe: profile gives points
+     * (x: the distance from the y axis, y: the height), and the mesh sweeps
+     * them round the y axis. Go up the outside, so the fronts face out; a
+     * vessel can come back down its inside to a floor. Ends on the axis
+     * close it.
+     * @param {import("./Vec2.mjs").Vec2[]} profile at least 2 points
+     * @param {Material} material
+     * @param {{ segments?: number, shading?: Shading }} [options] segments:
+     *   steps around the axis
+     */
+    static lathe(profile, material, { segments = 64, shading = "smooth" } = {}) {
+
+        if (profile.length < 2)
+            throw new RangeError("A lathe's profile needs at least 2 points.");
+
+        const steps = profile.length - 1;
+
+        return Mesh.surface((u, v) => {
+
+            const p = profile[Math.round(v * steps)];
+            const a = u * 2.0 * Math.PI;
+
+            return new Vec3(p.x * Math.cos(a), p.y, -p.x * Math.sin(a));
+
+        }, segments, steps, material, { uWrap: "closed", shading });
+    }
+
+    /**
      * A torus around the y axis.
      * @param {Material} material
      * @param {{ radius?: number, tube?: number, segments?: number, sides?: number }} [options]

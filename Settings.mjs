@@ -16,6 +16,7 @@ export const DEFAULT_SETTINGS = {
     exposure: 0.0,                   // in stops, -4 to 4
     sample_limit: 4096,              // a key of SAMPLE_LIMITS: stop when reached
     tame_fireflies: true,            // clamp each path's brightness
+    denoise: true,                   // smooth the noise while samples build up
     theme: "auto",                   // a key of THEMES
 };
 
@@ -54,6 +55,7 @@ export function sanitizeSettings(value) {
         exposure: number(v.exposure, EXPOSURE_RANGE.min, EXPOSURE_RANGE.max, d.exposure),
         sample_limit: typeof v.sample_limit === "number" && Object.hasOwn(SAMPLE_LIMITS, String(v.sample_limit)) ? v.sample_limit : d.sample_limit,
         tame_fireflies: typeof v.tame_fireflies === "boolean" ? v.tame_fireflies : d.tame_fireflies,
+        denoise: typeof v.denoise === "boolean" ? v.denoise : d.denoise,
         theme: Object.hasOwn(THEMES, v.theme) ? v.theme : d.theme,
     };
 }
