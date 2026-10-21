@@ -65,7 +65,7 @@ test("Renderer writes each uniform where the shader reads it", () => {
         cam_pos: 0, lens_radius: 3, cam_right: 4, tan_half_fov: 7, cam_up: 8, focus_distance: 11,
         cam_forward: 12, aspect: 15, sky_zenith: 16, sun_omc: 19, sky_horizon: 20, sun_on: 23,
         sky_ground: 24, firefly_clamp: 27, sun_dir: 28, light_count: 31, sun_radiance: 32, max_bounces: 35,
-        view: 36, volume_count: 37, width: 40, height: 41, sample_offset: 42, samples_per_frame: 43, total_samples: 44, exposure: 45, denoise: 46,
+        view: 36, volume_count: 37, env_strength: 38, env_rotation: 39, width: 40, height: 41, sample_offset: 42, samples_per_frame: 43, total_samples: 44, exposure: 45, denoise: 46,
     };
 
     for (const [field, index] of Object.entries(written))
@@ -73,7 +73,7 @@ test("Renderer writes each uniform where the shader reads it", () => {
 
     // Everything that changes the image comes before the 168 bytes that
     // decide whether to start again; the per-frame fields come after.
-    for (const field of ["view", "volume_count", "width", "height", "max_bounces", "firefly_clamp", "lens_radius"])
+    for (const field of ["view", "volume_count", "env_strength", "env_rotation", "width", "height", "max_bounces", "firefly_clamp", "lens_radius"])
         assert.ok(offsets[field] < 168, `${field} restarts the image`);
     for (const field of ["sample_offset", "samples_per_frame", "total_samples", "exposure", "denoise"])
         assert.ok(offsets[field] >= 168, `${field} doesn't`);

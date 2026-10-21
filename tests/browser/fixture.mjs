@@ -5,6 +5,7 @@
 import {
     Box, Camera, Mat4, Material, Mesh, Quad, Renderer, Scene, Sky, Sphere, Texture, Vec2, Vec3,
 } from "../../src/index.mjs";
+import { ENVIRONMENT, ROTATION, STRENGTH } from "./environment.mjs";
 
 // Two textures of the same size (so the renderer needn't resize either):
 // smooth colour gradients, and a coarse grid of distinct colours that
@@ -191,6 +192,19 @@ const SCENES = {
             new Quad(new Vec3(-0.3, -2, -3), new Vec3(0.6, 0, 0), new Vec3(0, 4, 0), Material.light(WHITE, 1.0)),
             new Sphere(new Vec3(0, 0, 0), 1, Material.glass(1.5, WHITE, Number(abbe)))),
         camera: { position: new Vec3(0, 0, 3.2), target: new Vec3(0, 0, 0), fov: Math.PI / 3 },
+    }),
+
+    // The test environment, turned, seen bare all round the horizon.
+    environmentSky: () => ({
+        scene: new Scene({ sky: Sky.environment(ENVIRONMENT, STRENGTH, ROTATION) }),
+        camera: { position: new Vec3(0, 0, 0), target: new Vec3(0.3, 0.25, -1), fov: 2.2 },
+    }),
+
+    // A floor under the test environment, which lights it the same
+    // everywhere, by an amount worked out from the panorama.
+    environmentFloor: () => ({
+        scene: new Scene({ sky: Sky.environment(ENVIRONMENT, STRENGTH, ROTATION) }).add(floor()),
+        camera: LOOK_DOWN,
     }),
 
     lightAsMesh: (material) => ({

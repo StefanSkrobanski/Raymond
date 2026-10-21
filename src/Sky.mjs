@@ -1,3 +1,4 @@
+import { EnvironmentMap } from "./EnvironmentMap.mjs";
 import { Vec3 } from "./Vec3.mjs";
 
 /**
@@ -11,13 +12,20 @@ import { Vec3 } from "./Vec3.mjs";
  *   the sun, compared with 1 for a white sky all round; 0 for no sun
  * @property {number} [sunSize] the sun's angular radius in radians: larger
  *   suns cast softer shadows
+ * @property {EnvironmentMap | null} [environment] a panorama of the light
+ *   all round, in place of the gradient; the renderer samples it directly,
+ *   in proportion to its brightness, so even a small bright sun in it
+ *   lights the scene with little noise
+ * @property {number} [environmentStrength] multiplies the environment
+ * @property {number} [environmentRotation] turns the environment about the
+ *   vertical, in radians
  */
 
 /**
  * The light from everything a ray can escape to: a gradient from the
- * ground through the horizon to the zenith, and an optional sun, a bright
- * disc that the renderer samples directly, so it lights the scene with
- * little noise. Immutable.
+ * ground through the horizon to the zenith, or an environment map (an HDR
+ * panorama), and an optional sun, a bright disc that the renderer samples
+ * directly, so it lights the scene with little noise. Immutable.
  */
 export class Sky {
 
@@ -28,6 +36,10 @@ export class Sky {
     #sunColor;
     #sunStrength;
     #sunSize;
+    /** @type {EnvironmentMap | null} */
+    #environment;
+    #environmentStrength;
+    #environmentRotation;
 
     /** @param {SkyOptions} [options] */
     constructor({
@@ -38,6 +50,9 @@ export class Sky {
         sunColor = new Vec3(1.0, 0.95, 0.85),
         sunStrength = 0.0,
         sunSize = 0.05,
+        environment = null,
+        environmentStrength = 1.0,
+        environmentRotation = 0.0,
     } = {}) {
 
         this.#zenith = zenith;
@@ -47,6 +62,19 @@ export class Sky {
         this.#sunColor = sunColor;
         this.#sunStrength = Math.max(sunStrength, 0.0);
         this.#sunSize = Math.min(Math.max(sunSize, 0.001), Math.PI / 4.0);
+        this.#environment = environment;
+        this.#environmentStrength = Math.max(environmentStrength, 0.0);
+        this.#environmentRotation = environmentRotation;
+    }
+
+    /**
+     * A sky of an environment map alone.
+     * @param {EnvironmentMap} environment
+     * @param {number} [strength]
+     * @param {number} [rotation] about the vertical, in radians
+     */
+    static environment(environment, strength = 1.0, rotation = 0.0) {
+        return new Sky({ environment, environmentStrength: strength, environmentRotation: rotation });
     }
 
     /** A sky giving no light at all, for a closed room. */
@@ -85,6 +113,18 @@ export class Sky {
         return this.#sunSize;
     }
 
+    get environment() {
+        return this.#environment;
+    }
+
+    get environmentStrength() {
+        return this.#environmentStrength;
+    }
+
+    get environmentRotation() {
+        return this.#environmentRotation;
+    }
+
     /**
      * The radiance of the sun's disc: its strength spread over the solid
      * angle it covers.
@@ -93,6 +133,24 @@ export class Sky {
 
         const solid_angle = 2.0 * Math.PI * (1.0 - Math.cos(this.#sunSize));
         return this.#sunColor.scale(this.#sunStrength / solid_angle);
+    }
+
+    /**
+     * The radiance of the sky towards direction d (unit length), as the
+     * renderer sees it: the environment map, turned and scaled, or else
+     * the gradient. The sun's disc isn't included.
+     * @param {Vec3} d
+     */
+    radiance(d) {
+
+        if (this.#environment) {
+            const [u, v] = EnvironmentMap.uv(d);
+            const turned = EnvironmentMap.direction(u - this.#environmentRotation / (2.0 * Math.PI), v);
+            return this.#environment.sample(turned).scale(this.#environmentStrength);
+        }
+
+        const t = Math.sqrt(Math.min(Math.abs(d.y), 1.0));
+        return d.y >= 0.0 ? this.#horizon.lerp(this.#zenith, t) : this.#horizon.lerp(this.#ground, t);
     }
 
     /**
@@ -109,6 +167,9 @@ export class Sky {
             sunColor: this.#sunColor,
             sunStrength: this.#sunStrength,
             sunSize: this.#sunSize,
+            environment: this.#environment,
+            environmentStrength: this.#environmentStrength,
+            environmentRotation: this.#environmentRotation,
             ...options,
         });
     }

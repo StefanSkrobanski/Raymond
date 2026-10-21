@@ -11,6 +11,8 @@ import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inflateSync } from "node:zlib";
 import { chromium } from "playwright";
+import { Sky, Vec3 } from "../../src/index.mjs";
+import { ENVIRONMENT, ROTATION, STRENGTH } from "./environment.mjs";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -323,6 +325,49 @@ test("light through black smoke falls off as exp(-density × distance)", async (
     assert.ok(smooth.length > 100, `${smooth.length} pixels through smoke`);
     const ratio = mean(smooth.map((i) => pixels[i * 4] / expected[i]));
     assert.ok(Math.abs(ratio - 1.0) < 0.02, `rendered / exact = ${ratio}`);
+});
+
+test("the GPU's environment map matches the CPU's, turned and all", async () => {
+
+    const size = 48;
+    const { pixels, rays } = await trace("environmentSky", { view: "albedo", spp: 1, size });
+    const sky = Sky.environment(ENVIRONMENT, STRENGTH, ROTATION);
+
+    let wrong = 0;
+    for (let i = 0; i < size * size; ++i) {
+        const d = new Vec3(...rays[i].direction).normalized();
+        const cpu = sky.radiance(d), gpu = rgb(pixels, i);
+        // Half floats on the GPU: about 3 significant figures.
+        if ([cpu.x, cpu.y, cpu.z].some((c, k) => Math.abs(gpu[k] - c) > 0.01 * c + 0.005))
+            wrong++;
+    }
+
+    assert.ok(wrong <= size * size * 0.01, `${wrong} pixels disagree`);
+});
+
+test("light from an environment map matches the exact answer", async () => {
+
+    // The irradiance on a floor facing up: the radiance above, times
+    // cos(θ), over the hemisphere, by the midpoint rule.
+    const sky = Sky.environment(ENVIRONMENT, STRENGTH, ROTATION);
+    const rows = 400, columns = 800;
+    let irradiance = 0;
+    for (let i = 0; i < rows; ++i) {
+        const theta = (i + 0.5) / rows * Math.PI / 2;
+        for (let j = 0; j < columns; ++j) {
+            const phi = (j + 0.5) / columns * 2 * Math.PI;
+            const d = new Vec3(Math.sin(theta) * Math.cos(phi), Math.cos(theta), Math.sin(theta) * Math.sin(phi));
+            const l = sky.radiance(d);
+            irradiance += mean([l.x, l.y, l.z]) * Math.cos(theta) * Math.sin(theta) * (Math.PI / 2 / rows) * (2 * Math.PI / columns);
+        }
+    }
+
+    const size = 32;
+    const result = await trace("environmentFloor", { spp: 64, size, bounces: 1 });
+
+    const ratios = interior(result.hits, size, 0).map((i) => mean(rgb(result.pixels, i)) / (0.5 / Math.PI * irradiance));
+    assert.ok(ratios.length > 200, `${ratios.length} floor pixels`);
+    assert.ok(Math.abs(mean(ratios) - 1.0) < 0.015, `rendered / exact = ${mean(ratios)}`);
 });
 
 // The brightness of the floor (albedo 0.5) at each pixel, against the

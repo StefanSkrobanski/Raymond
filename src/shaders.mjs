@@ -17,7 +17,7 @@ struct Params {
     sky_ground: vec3f, firefly_clamp: f32,
     sun_dir: vec3f, light_count: u32,
     sun_radiance: vec3f, max_bounces: u32,
-    view: u32, volume_count: u32, _pad1: u32, _pad2: u32,
+    view: u32, volume_count: u32, env_strength: f32, env_rotation: f32,  // env_strength: 0 for no environment map
     width: u32, height: u32, sample_offset: u32, samples_per_frame: u32,
     total_samples: u32, exposure: f32, denoise: u32, _pad4: u32,
 }
@@ -85,6 +85,12 @@ struct Material {
 @group(0) @binding(10) var texture_sampler: sampler;
 // Normal maps, read as plain numbers rather than sRGB.
 @group(0) @binding(11) var normal_maps: texture_2d_array<f32>;
+// The environment map, and the table for picking directions from it: see
+// EnvironmentMap.importance(). Its sampler wraps round the horizon but not
+// over the poles.
+@group(0) @binding(12) var env_map: texture_2d<f32>;
+@group(0) @binding(13) var env_table: texture_2d<f32>;
+@group(0) @binding(14) var env_sampler: sampler;
 
 // ---- Random numbers: PCG ----
 
@@ -494,7 +500,74 @@ fn offset(s: Surface, wi: vec3f) -> vec3f {
 
 // ---- Sky ----
 
+// Where direction d falls on the environment map, turned by its rotation:
+// see EnvironmentMap.uv().
+fn env_uv(d: vec3f) -> vec2f {
+    let u = 0.5 + atan2(d.x, -d.z) / (2.0 * PI) - params.env_rotation / (2.0 * PI);
+    return vec2f(u - floor(u), acos(clamp(d.y, -1.0, 1.0)) / PI);
+}
+
+fn env_radiance(d: vec3f) -> vec3f {
+    return textureSampleLevel(env_map, env_sampler, env_uv(d), 0.0).rgb * params.env_strength;
+}
+
+fn env_cdf(x: u32, y: u32) -> f32 {
+    return textureLoad(env_table, vec2u(x, y), 0).r;
+}
+
+// The first of n entries of a cumulative distribution in row y of the
+// table that exceeds xi.
+fn env_search(y: u32, n: u32, xi: f32) -> u32 {
+    var lo = 0u;
+    var hi = n - 1u;
+    loop {
+        if (lo >= hi) {
+            break;
+        }
+        let mid = (lo + hi) / 2u;
+        if (env_cdf(mid, y) > xi) {
+            hi = mid;
+        }
+        else {
+            lo = mid + 1u;
+        }
+    }
+    return lo;
+}
+
+// The probability density per steradian of picking direction d from the
+// environment: see EnvironmentMap.pdf().
+fn env_pdf(d: vec3f) -> f32 {
+    let size = textureDimensions(env_table);
+    let cw = size.x;
+    let ch = size.y - 1u;
+    let uv = env_uv(d);
+    let x = min(u32(uv.x * f32(cw)), cw - 1u);
+    let y = min(u32(uv.y * f32(ch)), ch - 1u);
+    let row = env_cdf(y, ch) - select(0.0, env_cdf(y - 1u, ch), y > 0u);
+    let cell = env_cdf(x, y) - select(0.0, env_cdf(x - 1u, y), x > 0u);
+    let s = sin(uv.y * PI);
+    return select(0.0, row * cell * f32(cw * ch) / (2.0 * PI * PI * s), s > 0.0);
+}
+
+// A direction picked from the environment in proportion to its light.
+fn sample_env() -> vec3f {
+    let size = textureDimensions(env_table);
+    let cw = size.x;
+    let ch = size.y - 1u;
+    let y = env_search(ch, ch, rand());
+    let x = env_search(y, cw, rand());
+    let u = (f32(x) + rand()) / f32(cw) + params.env_rotation / (2.0 * PI);
+    let v = (f32(y) + rand()) / f32(ch);
+    let phi = (u - 0.5) * 2.0 * PI;
+    let theta = v * PI;
+    return vec3f(sin(theta) * sin(phi), cos(theta), -sin(theta) * cos(phi));
+}
+
 fn sky(d: vec3f) -> vec3f {
+    if (params.env_strength > 0.0) {
+        return env_radiance(d);
+    }
     if (d.y >= 0.0) {
         return mix(params.sky_horizon, params.sky_zenith, sqrt(min(d.y, 1.0)));
     }
@@ -690,8 +763,18 @@ fn sample_bsdf(m: Material, base: vec3f, s: Surface, wo: vec3f) -> BsdfSample {
 
 // ---- Lights ----
 
+// The lights next event estimation chooses among: the lights, then the
+// sun, then the environment.
 fn light_choices() -> u32 {
-    return params.light_count + select(0u, 1u, params.sun_on != 0u);
+    return params.light_count + select(0u, 1u, params.sun_on != 0u) + select(0u, 1u, params.env_strength > 0.0);
+}
+
+fn sun_choice() -> u32 {
+    return select(NONE, params.light_count, params.sun_on != 0u);
+}
+
+fn env_choice() -> u32 {
+    return select(NONE, params.light_count + select(0u, 1u, params.sun_on != 0u), params.env_strength > 0.0);
 }
 
 // 1 - cos of the half-angle a sphere covers from a point at squared
@@ -715,7 +798,16 @@ fn sample_light(p: vec3f) -> LightSample {
     let pick = min(u32(rand() * f32(choices)), choices - 1u);
     let chance = 1.0 / f32(choices);
 
-    if (pick == params.light_count) {
+    if (pick == env_choice()) {
+        let wi = sample_env();
+        let pdf = env_pdf(wi);
+        if (pdf <= 0.0) {
+            return none;
+        }
+        return LightSample(wi, INF, env_radiance(wi), chance * pdf);
+    }
+
+    if (pick == sun_choice()) {
         let wi = sample_cone(params.sun_dir, params.sun_omc);
         return LightSample(wi, INF, params.sun_radiance, chance / (2.0 * PI * params.sun_omc));
     }
@@ -1010,7 +1102,13 @@ fn radiance(px: vec2f) -> vec3f {
             if (!guided) {
                 g_albedo = throughput;
             }
-            result += throughput * sky(d);
+            // An environment is sampled directly too, so weigh it against
+            // that; the gradient isn't.
+            var sky_weight = 1.0;
+            if (params.env_strength > 0.0 && !last_delta) {
+                sky_weight = power_heuristic(last_pdf, env_pdf(d) / f32(choices));
+            }
+            result += throughput * sky(d) * sky_weight;
             if (in_sun(d)) {
                 var w = 1.0;
                 if (!last_delta) {
