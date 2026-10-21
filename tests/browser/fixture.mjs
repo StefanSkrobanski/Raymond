@@ -207,6 +207,34 @@ const SCENES = {
         camera: LOOK_DOWN,
     }),
 
+    // Caustics, for comparing light tracing with path tracing alone: a
+    // glass ball focusing a lamp, or the sun, onto the floor, and a mirror
+    // throwing a lamp's light onto it.
+    causticLamp: () => ({
+        scene: new Scene({ sky: Sky.black() }).add(
+            floor(),
+            new Sphere(new Vec3(0, 0.9, 0), 0.5, Material.glass(1.5)),
+            new Sphere(new Vec3(0.3, 2.6, -0.2), 0.15, Material.light(WHITE, 60.0))),
+        camera: LOOK_DOWN,
+    }),
+
+    causticSun: () => ({
+        scene: new Scene({
+            sky: new Sky({ zenith: BLACK, horizon: BLACK, ground: BLACK, sunStrength: 2.0, sunDirection: new Vec3(0.3, 1, 0.1), sunSize: 0.03 }),
+        }).add(floor(), new Sphere(new Vec3(0, 0.9, 0), 0.5, Material.glass(1.5))),
+        camera: LOOK_DOWN,
+    }),
+
+    causticMirror: () => ({
+        scene: new Scene({ sky: Sky.black() }).add(
+            floor(),
+            new Quad(new Vec3(-1, 0.2, -1.6), new Vec3(2, 0, 0), new Vec3(0, 1.2, 0.5), Material.metal(new Vec3(0.9, 0.9, 0.9), 0)),
+            // Facing the mirror (u × v points to -z), so it lights the floor
+            // only by it, apart from what spills straight down.
+            new Quad(new Vec3(0.25, 1.4, 1.4), new Vec3(-0.5, 0, 0), new Vec3(0, 0.5, 0.2), Material.light(WHITE, 30.0))),
+        camera: LOOK_DOWN,
+    }),
+
     lightAsMesh: (material) => ({
         scene: new Scene({ sky: Sky.black() }).add(
             floor(MATERIALS[material]),
@@ -233,7 +261,7 @@ let renderer;
  * @param {string} name
  * @param {{ arg?: string, spp?: number, bounces?: number, view?: import("../../src/Renderer.mjs").View, size?: number, denoise?: boolean }} options
  */
-async function trace(name, { arg, spp = 16, bounces = 8, view = "color", size = 48, denoise = false } = {}) {
+async function trace(name, { arg, spp = 16, bounces = 8, view = "color", size = 48, denoise = false, caustics = true } = {}) {
 
     const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById("canvas"));
     canvas.width = size;
@@ -251,6 +279,7 @@ async function trace(name, { arg, spp = 16, bounces = 8, view = "color", size = 
     renderer.fireflyClamp = 0;
     renderer.samplesPerFrame = Math.min(spp, 16);
     renderer.denoise = denoise;
+    renderer.caustics = caustics;
     renderer.reset();
 
     while (renderer.samples < spp)
