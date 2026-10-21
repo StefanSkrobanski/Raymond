@@ -8,7 +8,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Runners vary: the same tests have taken 5 minutes and over 20.
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
