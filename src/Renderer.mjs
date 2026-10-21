@@ -88,6 +88,9 @@ export class Renderer {
     #uploaded_scene = null;
     #uploaded_version = -1;
     #light_count = 0;
+    #volume_count = 0;
+    /** @type {GPUTexture | null} */
+    #normal_maps = null;
 
     // Per pixel: the accumulated colour, the denoiser's guides, two
     // buffers it filters back and forth between, and its result.
@@ -394,6 +397,7 @@ export class Renderer {
         for (const buffer of [...this.#pixel_buffers, ...this.#pass_buffers])
             buffer.destroy();
         this.#textures?.destroy();
+        this.#normal_maps?.destroy();
         this.#accum?.destroy();
         this.#params_buffer.destroy();
         this.#context.unconfigure();
@@ -422,16 +426,22 @@ export class Renderer {
             return buffer;
         };
 
+        const lights = packed.lights[0] == 0xffffffff ? [] : [...packed.lights];
+
         this.#scene_buffers = [
             storage("primitives", packed.primitives),
             storage("nodes", packed.nodes),
             storage("materials", packed.materials),
             storage("attributes", packed.attributes),
-            storage("lights", packed.lights),
+            storage("lights and volumes", new Uint32Array(lights.length + packed.volumes.length > 0 ? [...lights, ...packed.volumes] : [0xffffffff])),
         ];
 
-        this.#light_count = packed.lights[0] == 0xffffffff ? 0 : packed.lights.length;
-        this.#uploadTextures(packed.textures);
+        this.#light_count = lights.length;
+        this.#volume_count = packed.volumes.length;
+        this.#textures?.destroy();
+        this.#textures = this.#uploadTextures("textures", packed.textures, "rgba8unorm-srgb");
+        this.#normal_maps?.destroy();
+        this.#normal_maps = this.#uploadTextures("normal maps", packed.normalMaps, "rgba8unorm");
         this.#uploaded_scene = scene;
         this.#uploaded_version = scene.version;
         this.#trace_group = null;
@@ -441,34 +451,39 @@ export class Renderer {
             this.#bind();
     }
 
-    // Packs the textures into one array texture, one layer each, resized
-    // to the largest one's size. With none, a single white pixel stands in,
-    // since something must be bound.
-    /** @param {import("./Texture.mjs").Texture[]} textures */
-    #uploadTextures(textures) {
-
-        this.#textures?.destroy();
+    // Packs textures into one array texture, one layer each, resized to the
+    // largest one's size. With none, a single white pixel stands in, since
+    // something must be bound. Colour textures are sRGB; normal maps are
+    // plain numbers, and resized as such.
+    /**
+     * @param {string} label
+     * @param {import("./Texture.mjs").Texture[]} textures
+     * @param {GPUTextureFormat} format
+     */
+    #uploadTextures(label, textures, format) {
 
         const width = Math.min(MAX_TEXTURE_SIZE, Math.max(1, ...textures.map((t) => t.width)));
         const height = Math.min(MAX_TEXTURE_SIZE, Math.max(1, ...textures.map((t) => t.height)));
         const layers = Math.max(1, textures.length);
 
-        this.#textures = this.#device.createTexture({
-            label: "textures",
+        const texture = this.#device.createTexture({
+            label,
             size: { width, height, depthOrArrayLayers: layers },
-            format: "rgba8unorm-srgb",
+            format,
             usage: TEXTURE_BINDING | TEXTURE_COPY_DST,
         });
 
         const data = textures.length > 0 ?
-            textures.map((t) => t.resized(width, height).data) :
+            textures.map((t) => t.resized(width, height, format == "rgba8unorm-srgb").data) :
             [new Uint8Array([255, 255, 255, 255])];
 
         data.forEach((bytes, layer) => this.#device.queue.writeTexture(
-            { texture: /** @type {GPUTexture} */ (this.#textures), origin: { x: 0, y: 0, z: layer } },
+            { texture, origin: { x: 0, y: 0, z: layer } },
             bytes,
             { bytesPerRow: width * 4, rowsPerImage: height },
             { width, height, depthOrArrayLayers: 1 }));
+
+        return texture;
     }
 
     /**
@@ -517,6 +532,7 @@ export class Renderer {
                 { binding: 8, resource: { buffer: guide_normal } },
                 { binding: 9, resource: /** @type {GPUTexture} */ (this.#textures).createView({ dimension: "2d-array" }) },
                 { binding: 10, resource: this.#sampler },
+                { binding: 11, resource: /** @type {GPUTexture} */ (this.#normal_maps).createView({ dimension: "2d-array" }) },
             ],
         });
 
@@ -593,6 +609,7 @@ export class Renderer {
         u[35] = this.#max_bounces;
 
         u[36] = VIEWS[this.#view];
+        u[37] = this.#volume_count;
         u[40] = width;
         u[41] = height;
 

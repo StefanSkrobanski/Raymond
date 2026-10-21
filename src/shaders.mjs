@@ -17,7 +17,7 @@ struct Params {
     sky_ground: vec3f, firefly_clamp: f32,
     sun_dir: vec3f, light_count: u32,
     sun_radiance: vec3f, max_bounces: u32,
-    view: u32, _pad0: u32, _pad1: u32, _pad2: u32,
+    view: u32, volume_count: u32, _pad1: u32, _pad2: u32,
     width: u32, height: u32, sample_offset: u32, samples_per_frame: u32,
     total_samples: u32, exposure: f32, denoise: u32, _pad4: u32,
 }
@@ -45,6 +45,7 @@ const METAL = 1u;
 const PLASTIC = 2u;
 const GLASS = 3u;
 const LIGHT = 4u;
+const VOLUME = 5u;
 
 struct Primitive {
     kind: u32, material: u32, light: u32, attributes: u32,
@@ -61,6 +62,8 @@ struct Material {
     emission: vec3f, roughness: f32,
     checker: vec3f, checker_size: f32,
     ior: f32, texture: u32, texture_scale: vec2f,
+    normal_map: u32, normal_scale: f32, emission_texture: u32, dispersion: f32,
+    density: f32, anisotropy: f32, _m0: f32, _m1: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -69,6 +72,8 @@ struct Material {
 @group(0) @binding(3) var<storage, read> materials: array<Material>;
 // Triangles' vertex normals and texture coordinates: see PackedScene.
 @group(0) @binding(4) var<storage, read> attributes: array<vec4f>;
+// The primitives to sample as lights (light_count of them), then the
+// volumes (volume_count).
 @group(0) @binding(5) var<storage, read> lights: array<u32>;
 // Per pixel, summed over samples: the colour, with the luminance squared in
 // w (for the noise estimate); and the denoiser's guides, the albedo and
@@ -78,6 +83,8 @@ struct Material {
 @group(0) @binding(8) var<storage, read_write> guide_normal: array<vec4f>;
 @group(0) @binding(9) var textures: texture_2d_array<f32>;
 @group(0) @binding(10) var texture_sampler: sampler;
+// Normal maps, read as plain numbers rather than sRGB.
+@group(0) @binding(11) var normal_maps: texture_2d_array<f32>;
 
 // ---- Random numbers: PCG ----
 
@@ -345,21 +352,29 @@ fn surface(o: vec3f, d: vec3f, hit: Hit) -> Surface {
     var ng: vec3f;
     var ns: vec3f;
     var uv: vec2f;
+    // Which way the texture runs right and up, for normal maps: see
+    // Scene.#tangents.
+    var tangent: vec3f;
+    var up: vec3f;
 
     // The texture coordinates follow Scene.raycast's: see Scene.#uv.
     switch p.kind {
         case 0u: {
             ng = normalize(point - p.p0.xyz);
             ns = ng;
-            // Longitude and latitude on the globe.
-            let z = cross(p.p1.xyz, p.p2.xyz);
-            let u = atan2(-dot(ng, z), dot(ng, p.p1.xyz)) / (2.0 * PI);
-            uv = vec2f(u - floor(u), acos(clamp(dot(ng, p.p2.xyz), -1.0, 1.0)) / PI);
+            uv = sphere_uv(ng, p);
+            tangent = cross(p.p2.xyz, ng);
+            if (length(tangent) < 1e-6) {
+                tangent = p.p1.xyz;
+            }
+            up = cross(ng, tangent);
         }
         case 1u: {
             ng = normalize(cross(p.p1.xyz, p.p2.xyz));
             ns = ng;
             uv = vec2f(hit.u, 1.0 - hit.v);
+            tangent = p.p1.xyz;
+            up = p.p2.xyz;
         }
         case 2u: {
             // The axis on which the box-space point is furthest out; its
@@ -372,43 +387,98 @@ fn surface(o: vec3f, d: vec3f, hit: Hit) -> Surface {
             if (a.x >= a.y && a.x >= a.z) {
                 ng = p.p0.xyz * sign(lp.x);
                 uv = vec2f((1.0 - sign(lp.x) * lp.z) * half.z, (1.0 - lp.y) * half.y);
+                tangent = -sign(lp.x) * p.p2.xyz;
+                up = p.p1.xyz;
             }
             else if (a.y >= a.z) {
                 ng = p.p1.xyz * sign(lp.y);
                 uv = vec2f((1.0 + lp.x) * half.x, (1.0 + sign(lp.y) * lp.z) * half.z);
+                tangent = p.p0.xyz;
+                up = -sign(lp.y) * p.p2.xyz;
             }
             else {
                 ng = p.p2.xyz * sign(lp.z);
                 uv = vec2f((1.0 + sign(lp.z) * lp.x) * half.x, (1.0 - lp.y) * half.y);
+                tangent = sign(lp.z) * p.p0.xyz;
+                up = p.p1.xyz;
             }
             ng = normalize(ng);
             ns = ng;
         }
         default: {
-            ng = normalize(cross(p.p1.xyz - p.p0.xyz, p.p2.xyz - p.p0.xyz));
+            let e1 = p.p1.xyz - p.p0.xyz;
+            let e2 = p.p2.xyz - p.p0.xyz;
+            ng = normalize(cross(e1, e2));
             ns = ng;
             uv = vec2f(hit.u, hit.v);
+            var du1 = vec2f(1.0, 0.0);
+            var du2 = vec2f(0.0, 1.0);
             if (p.attributes != NONE) {
                 let w = 1.0 - hit.u - hit.v;
                 let a0 = attributes[p.attributes];
                 let a1 = attributes[p.attributes + 1u];
                 let a2 = attributes[p.attributes + 2u];
                 let vs = attributes[p.attributes + 3u];
-                uv = vec2f(a0.w * w + a1.w * hit.u + a2.w * hit.v, vs.x * w + vs.y * hit.u + vs.z * hit.v);
-                if (vs.w != 0.0) {
+                // Flags: 1 for smooth normals, 2 for texture coordinates.
+                let flags = u32(vs.w);
+                if ((flags & 1u) != 0u) {
                     ns = normalize(a0.xyz * w + a1.xyz * hit.u + a2.xyz * hit.v);
                     if (dot(ns, ng) < 0.0) {
                         ns = -ns;
                     }
                 }
+                if ((flags & 2u) != 0u) {
+                    uv = vec2f(a0.w * w + a1.w * hit.u + a2.w * hit.v, vs.x * w + vs.y * hit.u + vs.z * hit.v);
+                    let t1 = vec2f(a1.w - a0.w, vs.y - vs.x);
+                    let t2 = vec2f(a2.w - a0.w, vs.z - vs.x);
+                    if (abs(t1.x * t2.y - t2.x * t1.y) > 1e-12) {
+                        du1 = t1;
+                        du2 = t2;
+                    }
+                }
             }
+            // How the position changes with u and v.
+            let det = du1.x * du2.y - du2.x * du1.y;
+            tangent = (e1 * du2.y - e2 * du1.y) / det;
+            up = -(e2 * du1.x - e1 * du2.x) / det;
         }
+    }
+
+    let m = materials[p.material];
+    if (m.normal_map != NONE) {
+        let t = textureSampleLevel(normal_maps, texture_sampler, uv * m.texture_scale, m.normal_map, 0.0).xyz;
+        ns = bump(ns, ng, tangent, up, t, m.normal_scale);
     }
 
     let front = dot(ng, d) < 0.0;
     let flip = select(-1.0, 1.0, front);
 
     return Surface(point, ns * flip, ng * flip, front, p.material, p.light, p.kind, uv);
+}
+
+// Longitude and latitude on a sphere's globe, for unit direction n from
+// its centre: see sphereUv.
+fn sphere_uv(n: vec3f, p: Primitive) -> vec2f {
+    let z = cross(p.p1.xyz, p.p2.xyz);
+    let u = atan2(-dot(n, z), dot(n, p.p1.xyz)) / (2.0 * PI);
+    return vec2f(u - floor(u), acos(clamp(dot(n, p.p2.xyz), -1.0, 1.0)) / PI);
+}
+
+// The shading normal n tilted by a normal map's texel t, in the frame of
+// the texture's right and up, kept outside the geometric normal ng: as
+// Scene's bump().
+fn bump(n: vec3f, ng: vec3f, tangent: vec3f, up: vec3f, t: vec3f, strength: f32) -> vec3f {
+    var right = tangent - n * dot(n, tangent);
+    if (length(right) < 1e-9) {
+        return n;
+    }
+    right = normalize(right);
+    var above = cross(n, right);
+    if (dot(above, up) < 0.0) {
+        above = -above;
+    }
+    let tilted = normalize(right * ((t.x * 2.0 - 1.0) * strength) + above * ((t.y * 2.0 - 1.0) * strength) + n * (t.z * 2.0 - 1.0));
+    return select(n, tilted, dot(tilted, ng) > 0.0);
 }
 
 fn occluded(o: vec3f, d: vec3f, dist: f32) -> bool {
@@ -450,6 +520,14 @@ fn albedo(m: Material, p: vec3f, uv: vec2f) -> vec3f {
         c *= textureSampleLevel(textures, texture_sampler, uv * m.texture_scale, m.texture, 0.0).rgb;
     }
     return c;
+}
+
+// What a material gives off at texture coordinate uv.
+fn emitted(m: Material, uv: vec2f) -> vec3f {
+    if (m.emission_texture == NONE) {
+        return m.emission;
+    }
+    return m.emission * textureSampleLevel(textures, texture_sampler, uv * m.texture_scale, m.emission_texture, 0.0).rgb;
 }
 
 fn is_delta(m: Material) -> bool {
@@ -643,10 +721,12 @@ fn sample_light(p: vec3f) -> LightSample {
     }
 
     let prim = prims[lights[pick]];
-    let emission = materials[prim.material].emission;
+    let m = materials[prim.material];
 
     if (prim.kind == QUAD) {
-        let q = prim.p0.xyz + prim.p1.xyz * rand() + prim.p2.xyz * rand();
+        let a = rand();
+        let b = rand();
+        let q = prim.p0.xyz + prim.p1.xyz * a + prim.p2.xyz * b;
         let to = q - p;
         let d2 = dot(to, to);
         let dist = sqrt(d2);
@@ -657,7 +737,7 @@ fn sample_light(p: vec3f) -> LightSample {
         if (cos_l <= 0.0) {
             return none;
         }
-        return LightSample(wi, dist, emission, chance * d2 / (cos_l * area));
+        return LightSample(wi, dist, emitted(m, vec2f(a, 1.0 - b)), chance * d2 / (cos_l * area));
     }
 
     // A sphere: sample the cone it covers.
@@ -671,7 +751,8 @@ fn sample_light(p: vec3f) -> LightSample {
     let wi = sample_cone(to / sqrt(d2), omc);
     let b = dot(to, wi);
     let dist = b - sqrt(max(b * b - (d2 - r * r), 0.0));
-    return LightSample(wi, dist, emission, chance / (2.0 * PI * omc));
+    let n = normalize(p + wi * dist - prim.p0.xyz);
+    return LightSample(wi, dist, emitted(m, sphere_uv(n, prim)), chance / (2.0 * PI * omc));
 }
 
 // The pdf sample_light would have had of choosing a direction that hit
@@ -702,6 +783,125 @@ fn power_heuristic(a: f32, b: f32) -> f32 {
     return a2 / (a2 + b2);
 }
 
+// ---- Volumes ----
+
+// Where a ray crosses volume primitive i, a sphere or box: from x to y,
+// with x at least 0; x >= y if it misses.
+fn volume_span(i: u32, o: vec3f, d: vec3f) -> vec2f {
+
+    let p = prims[i];
+
+    if (p.kind == SPHERE) {
+        let oc = o - p.p0.xyz;
+        let a = dot(d, d);
+        let half_b = dot(oc, d);
+        let disc = half_b * half_b - a * (dot(oc, oc) - p.p0.w * p.p0.w);
+        if (disc < 0.0) {
+            return vec2f(1.0, 0.0);
+        }
+        let sq = sqrt(disc);
+        return vec2f(max((-half_b - sq) / a, 0.0), (-half_b + sq) / a);
+    }
+
+    let lo = vec3f(dot(p.p0.xyz, o) + p.p0.w, dot(p.p1.xyz, o) + p.p1.w, dot(p.p2.xyz, o) + p.p2.w);
+    let inv = 1.0 / safe(vec3f(dot(p.p0.xyz, d), dot(p.p1.xyz, d), dot(p.p2.xyz, d)));
+    let t0 = (-1.0 - lo) * inv;
+    let t1 = (1.0 - lo) * inv;
+    let tmin = min(t0, t1);
+    let tmax = max(t0, t1);
+    return vec2f(max(max(max(tmin.x, tmin.y), tmin.z), 0.0), min(min(tmax.x, tmax.y), tmax.z));
+}
+
+fn volume(k: u32) -> u32 {
+    return lights[params.light_count + k];
+}
+
+struct Scatter {
+    t: f32,
+    volume: u32,  // NONE if the ray got through
+}
+
+// Where, before t_max, a ray along unit direction d first meets a particle
+// in a volume, if it does. Each volume's distance is drawn from its own
+// exponential and the nearest wins, which is the same as drawing from all
+// of them together.
+fn scatter_in_volumes(o: vec3f, d: vec3f, t_max: f32) -> Scatter {
+
+    var s = Scatter(t_max, NONE);
+
+    for (var k = 0u; k < params.volume_count; k++) {
+        let i = volume(k);
+        let span = volume_span(i, o, d);
+        let end = min(span.y, s.t);
+        if (span.x < end) {
+            let t = span.x - log(1.0 - rand()) / materials[prims[i].material].density;
+            if (t < end) {
+                s = Scatter(t, i);
+            }
+        }
+    }
+
+    return s;
+}
+
+// The fraction of light that gets through the volumes along unit
+// direction d, from o to dist.
+fn transmittance(o: vec3f, d: vec3f, dist: f32) -> f32 {
+
+    var depth = 0.0;
+
+    for (var k = 0u; k < params.volume_count; k++) {
+        let i = volume(k);
+        let span = volume_span(i, o, d);
+        let end = min(span.y, dist);
+        if (span.x < end) {
+            depth += materials[prims[i].material].density * (end - span.x);
+        }
+    }
+
+    return exp(-depth);
+}
+
+// The Henyey-Greenstein phase function, per steradian, for light
+// travelling along d turned to wi, where c = dot(d, wi).
+fn henyey_greenstein(c: f32, g: f32) -> f32 {
+    let k = 1.0 + g * g - 2.0 * g * c;
+    return (1.0 - g * g) / (4.0 * PI * k * sqrt(k));
+}
+
+// A direction drawn from henyey_greenstein, for light travelling along d.
+fn sample_henyey_greenstein(d: vec3f, g: f32) -> vec3f {
+    var c = 1.0 - 2.0 * rand();
+    if (abs(g) >= 1e-3) {
+        let sq = (1.0 - g * g) / (1.0 + g - 2.0 * g * rand());
+        c = clamp((1.0 + g * g - sq * sq) / (2.0 * g), -1.0, 1.0);
+    }
+    let sin_t = sqrt(max(0.0, 1.0 - c * c));
+    let phi = 2.0 * PI * rand();
+    return normalize(frame(d) * vec3f(sin_t * cos(phi), sin_t * sin(phi), c));
+}
+
+// ---- Dispersion ----
+
+fn lobe(x: f32, mu: f32, below: f32, above: f32) -> f32 {
+    let t = (x - mu) / select(above, below, x < mu);
+    return exp(-0.5 * t * t);
+}
+
+// The linear RGB of a single wavelength, in nanometres, from Wyman, Sloan
+// and Shirley's fit to the CIE colour matching functions, with the colours
+// sRGB can't show clipped, scaled so the average over 380-720 nm is white.
+fn wavelength_rgb(l: f32) -> vec3f {
+    let x = 1.056 * lobe(l, 599.8, 37.9, 31.0) + 0.362 * lobe(l, 442.0, 16.0, 26.7) - 0.065 * lobe(l, 501.1, 20.4, 26.2);
+    let y = 0.821 * lobe(l, 568.8, 46.9, 40.5) + 0.286 * lobe(l, 530.9, 16.3, 31.1);
+    let z = 1.217 * lobe(l, 437.0, 11.8, 36.0) + 0.681 * lobe(l, 459.0, 26.0, 13.8);
+    let rgb = vec3f(
+        3.2406 * x - 1.5372 * y - 0.4986 * z,
+        -0.9689 * x + 1.8758 * y + 0.0415 * z,
+        0.0557 * x - 0.2040 * y + 1.0570 * z);
+    return max(rgb, vec3f(0.0)) * vec3f(1.92985, 2.94689, 3.11081);
+}
+
 // ---- Paths ----
 
 fn camera_ray(px: vec2f, jitter: bool) -> array<vec3f, 2> {
@@ -723,6 +923,12 @@ fn camera_ray(px: vec2f, jitter: bool) -> array<vec3f, 2> {
     let origin = params.cam_pos + params.cam_right * lens.x + params.cam_up * lens.y;
     return array<vec3f, 2>(origin, normalize(focus - origin));
 }
+
+// Where in the spectrum this sample's wavelength falls, from 0 to 1, if it
+// needs one: successive samples of a pixel step through the spectrum by the
+// golden ratio from a random start, so a few cover it evenly and colours
+// split by glass converge far faster than with a random draw each.
+var<private> spectrum_u: f32;
 
 // What radiance() saw first, for the denoiser.
 var<private> g_albedo: vec3f;
@@ -746,10 +952,59 @@ fn radiance(px: vec2f) -> vec3f {
     var last_delta = true;
     var last_p = o;
     let choices = light_choices();
+    // Once a path meets glass that splits colours, it follows one
+    // wavelength, in nanometres; 0 until then.
+    var wavelength = 0.0;
 
     for (var depth = 0u; depth <= params.max_bounces; depth++) {
 
         let hit = trace(o, d, INF, false);
+
+        // A particle in a volume, before the surface (or the sky)?
+        let sc = scatter_in_volumes(o, d, hit.t);
+        if (sc.volume != NONE) {
+
+            let vm = materials[prims[sc.volume].material];
+            let p = o + d * sc.t;
+            travelled += sc.t;
+
+            if (!guided) {
+                guided = true;
+                g_albedo = throughput * vm.color;
+                g_normal = vec4f(-d, travelled);
+            }
+
+            if (depth == params.max_bounces) {
+                break;
+            }
+
+            throughput *= vm.color;
+
+            // Next event estimation, through the volumes on the way.
+            if (choices > 0u) {
+                let ls = sample_light(p);
+                if (ls.pdf > 0.0) {
+                    let phase = henyey_greenstein(dot(d, ls.wi), vm.anisotropy);
+                    let reach = ls.dist * (1.0 - 1e-3);
+                    if (!occluded(p, ls.wi, reach)) {
+                        result += throughput * ls.radiance * (phase * transmittance(p, ls.wi, reach) * power_heuristic(ls.pdf, phase) / ls.pdf);
+                    }
+                }
+            }
+
+            // The phase function is sampled exactly, so its weight is 1.
+            let wi = sample_henyey_greenstein(d, vm.anisotropy);
+            last_pdf = henyey_greenstein(dot(d, wi), vm.anisotropy);
+            last_delta = false;
+            last_p = p;
+            o = p;
+            d = wi;
+
+            if (!roulette(&throughput, depth)) {
+                break;
+            }
+            continue;
+        }
 
         if (hit.prim == NONE) {
             if (!guided) {
@@ -779,14 +1034,16 @@ fn radiance(px: vec2f) -> vec3f {
             g_normal = vec4f(s.n, travelled);
         }
 
-        if (m.kind == LIGHT) {
-            if (s.front) {
-                var w = 1.0;
-                if (!last_delta && s.light != NONE) {
-                    w = power_heuristic(last_pdf, light_pdf(hit.prim, last_p, d, hit.t));
-                }
-                result += throughput * m.emission * w;
+        // Lights, and glowing surfaces, give off light from their fronts.
+        if (s.front && any(m.emission > vec3f(0.0))) {
+            var w = 1.0;
+            if (!last_delta && s.light != NONE) {
+                w = power_heuristic(last_pdf, light_pdf(hit.prim, last_p, d, hit.t));
             }
+            result += throughput * emitted(m, s.uv) * w;
+        }
+
+        if (m.kind == LIGHT) {
             break;
         }
 
@@ -807,12 +1064,25 @@ fn radiance(px: vec2f) -> vec3f {
                 let origin = offset(s, ls.wi);
                 let reach = (ls.dist - dot(origin - s.p, ls.wi)) * (1.0 - 1e-3);
                 if (e.pdf > 0.0 && !occluded(origin, ls.wi, reach)) {
-                    result += throughput * e.f * ls.radiance * (power_heuristic(ls.pdf, e.pdf) / ls.pdf);
+                    result += throughput * e.f * ls.radiance * (transmittance(origin, ls.wi, reach) * power_heuristic(ls.pdf, e.pdf) / ls.pdf);
                 }
             }
         }
 
-        let bs = sample_bsdf(m, base, s, wo);
+        // Glass that splits colours: choose a wavelength, if none yet, and
+        // carry its colour; from then on, glass bends this path by its
+        // index of refraction at that wavelength (Cauchy's equation).
+        var sm = m;
+        if (m.kind == GLASS && m.dispersion > 0.0) {
+            if (wavelength == 0.0) {
+                wavelength = 380.0 + 340.0 * spectrum_u;
+                throughput *= wavelength_rgb(wavelength);
+            }
+            let l = wavelength * 1e-3;
+            sm.ior = m.ior + m.dispersion * (1.0 / (l * l) - 1.0 / (0.5876 * 0.5876));
+        }
+
+        let bs = sample_bsdf(sm, base, s, wo);
         if (!bs.ok) {
             break;
         }
@@ -824,18 +1094,27 @@ fn radiance(px: vec2f) -> vec3f {
         o = offset(s, bs.wi);
         d = bs.wi;
 
-        // Russian roulette: after a few bounces, end dim paths at random,
-        // boosting the survivors to make up for them.
-        if (depth >= 3u) {
-            let survive = min(max(throughput.x, max(throughput.y, throughput.z)), 0.95);
-            if (rand() >= survive) {
-                break;
-            }
-            throughput /= survive;
+        if (!roulette(&throughput, depth)) {
+            break;
         }
     }
 
     return result;
+}
+
+// Russian roulette: after a few bounces, ends dim paths at random (returning
+// false), boosting the survivors to make up for them.
+fn roulette(throughput: ptr<function, vec3f>, depth: u32) -> bool {
+    if (depth < 3u) {
+        return true;
+    }
+    let t = *throughput;
+    let survive = min(max(t.x, max(t.y, t.z)), 0.95);
+    if (rand() >= survive) {
+        return false;
+    }
+    *throughput = t / survive;
+    return true;
 }
 
 // The albedo, normal or depth seen through the centre of pixel px.
@@ -857,7 +1136,8 @@ fn inspect(px: vec2f) -> vec3f {
     switch params.view {
         case 1u: {
             if (m.kind == LIGHT) {
-                return m.emission / max(max(m.emission.x, m.emission.y), max(m.emission.z, 1.0));
+                let e = emitted(m, s.uv);
+                return e / max(max(e.x, e.y), max(e.z, 1.0));
             }
             return albedo(m, s.p, s.uv);
         }
@@ -890,6 +1170,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     for (var k = 0u; k < params.samples_per_frame; k++) {
 
         rng_state = pcg(index ^ pcg(params.sample_offset + k));
+        // In 32-bit fixed point, where 2654435769 is the golden ratio's
+        // fractional part, so it stays exact however many samples.
+        spectrum_u = f32((pcg(index * 7919u + 1u) + (params.sample_offset + k) * 2654435769u) >> 8u) * (1.0 / 16777216.0);
 
         var c: vec3f;
         g_albedo = vec3f(0.0);

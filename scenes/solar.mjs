@@ -1,6 +1,6 @@
 import { Mat4, Material, Mesh, Scene, Sky, Sphere, Vec3, hexColor } from "../src/index.mjs";
 import { profile, stars } from "./helpers.mjs";
-import { earth, jupiter, mars, moon, saturn } from "./textures.mjs";
+import { earth, earthLights, jupiter, mars, moon, moonBumps, saturn, sunSurface } from "./textures.mjs";
 
 const WHITE = new Vec3(1, 1, 1);
 
@@ -9,9 +9,9 @@ const WHITE = new Vec3(1, 1, 1);
  * orbit, and material.
  */
 export const PLANETS = [
-    { name: "Mercury", distance: 2.0, radius: 0.18, angle: 5.0, material: Material.diffuse(hexColor("#b8b0a4")).withTexture(moon(), 1, hexColor("#d8cfc0")) },
+    { name: "Mercury", distance: 2.0, radius: 0.18, angle: 5.0, material: Material.diffuse(hexColor("#b8b0a4")).withTexture(moon(), 1, hexColor("#d8cfc0")).withNormalMap(moonBumps(), 2) },
     { name: "Venus", distance: 2.9, radius: 0.32, angle: 4.3, material: Material.diffuse(hexColor("#e8cf9a")) },
-    { name: "Earth", distance: 4.0, radius: 0.34, angle: 3.75, material: Material.plastic(WHITE, 0.3).withTexture(earth()), tilt: 0.41 },
+    { name: "Earth", distance: 4.0, radius: 0.34, angle: 3.75, material: Material.plastic(WHITE, 0.3).withTexture(earth()).withEmission(WHITE, 0.25, earthLights()), tilt: 0.41 },
     { name: "Mars", distance: 5.0, radius: 0.24, angle: 3.2, material: Material.diffuse(WHITE).withTexture(mars()), tilt: 0.44 },
     { name: "Jupiter", distance: 6.6, radius: 0.85, angle: 2.55, material: Material.diffuse(WHITE).withTexture(jupiter()), tilt: 0.05 },
     { name: "Saturn", distance: 8.6, radius: 0.7, angle: 1.95, material: Material.diffuse(WHITE).withTexture(saturn()), tilt: 0.45 },
@@ -20,13 +20,16 @@ export const PLANETS = [
 /**
  * The sun and its planets, Saturn with its rings, against the stars. The
  * sun is the only light the planets get, so each has a lit day side and a
- * dark night side.
+ * dark night side, where the Earth's cities glow. The sun's surface churns
+ * with granules and sunspots (a light with an emission texture).
  */
 export function solarSystem() {
 
     const scene = new Scene({ sky: Sky.black() });
 
-    scene.add(new Sphere(new Vec3(0, 0, 0), 1.0, Material.light(hexColor("#ffd27a"), 12.0)));
+    // The sun's poles turned to its edges, where the camera doesn't see
+    // the pattern pinch.
+    scene.add(new Sphere(new Vec3(0, 0, 0), 1.0, Material.light(WHITE).withEmission(WHITE, 9.0, sunSurface()), { rotation: Mat4.rotateZ(Math.PI / 2) }));
 
     // Each tilted on its axis, as the planets are.
     for (const { distance, radius, angle, material, tilt = 0 } of PLANETS)
@@ -44,7 +47,7 @@ export function solarSystem() {
     // The moon, beside the earth.
     const earth = PLANETS[2];
     scene.add(new Sphere(new Vec3(earth.distance * Math.cos(earth.angle) + 0.55, 0.15, -earth.distance * Math.sin(earth.angle)), 0.09,
-        Material.diffuse(WHITE).withTexture(moon())));
+        Material.diffuse(WHITE).withTexture(moon()).withNormalMap(moonBumps(), 2)));
 
     scene.add(...stars(300, 80, 11));
 

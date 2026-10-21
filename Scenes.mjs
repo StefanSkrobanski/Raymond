@@ -12,13 +12,13 @@ import { bowling } from "./scenes/bowling.mjs";
 import { chess } from "./scenes/chess.mjs";
 import { candlelight } from "./scenes/candles.mjs";
 import { coffeeCupCaustic } from "./scenes/caustic.mjs";
-import { tinyCity } from "./scenes/city.mjs";
+import { cityAtNight, tinyCity } from "./scenes/city.mjs";
 import { cornellBox, cornellSpheres } from "./scenes/cornell.mjs";
 import { crystalCave } from "./scenes/crystals.mjs";
 import { newtonsCradle } from "./scenes/cradle.mjs";
 import { dna } from "./scenes/dna.mjs";
 import { dominoSpiral } from "./scenes/dominoes.mjs";
-import { lowPolyForest } from "./scenes/forest.mjs";
+import { lowPolyForest, mistyForest } from "./scenes/forest.mjs";
 import { textureGallery } from "./scenes/gallery.mjs";
 import { gems } from "./scenes/gems.mjs";
 import { glassGarden } from "./scenes/glass.mjs";
@@ -37,6 +37,7 @@ import { seashells } from "./scenes/shells.mjs";
 import { sierpinskiScene } from "./scenes/sierpinski.mjs";
 import { snowman } from "./scenes/snowman.mjs";
 import { solarSystem } from "./scenes/solar.mjs";
+import { prism } from "./scenes/prism.mjs";
 import { sphereflakeScene } from "./scenes/sphereflake.mjs";
 import { sphereField } from "./scenes/spheres.mjs";
 import { spiralStaircase } from "./scenes/staircase.mjs";
@@ -73,6 +74,7 @@ export const SCENES = [
     { id: "caustic", name: "Coffee cup caustic", category: "Light and glass", build: coffeeCupCaustic },
     { id: "magnifier", name: "Magnifying glass", category: "Light and glass", build: magnifyingGlass },
     { id: "water", name: "Glass of water", category: "Light and glass", build: glassOfWater },
+    { id: "prism", name: "Prism", category: "Light and glass", build: prism },
     { id: "still-life", name: "Still life", category: "Objects", build: stillLife },
     { id: "cradle", name: "Newton's cradle", category: "Objects", build: newtonsCradle },
     { id: "chess", name: "Chess", category: "Objects", build: chess },
@@ -87,10 +89,12 @@ export const SCENES = [
     { id: "rocket", name: "Rocket launch", category: "Objects", build: rocketLaunch },
     { id: "island", name: "Island at sunset", category: "Places", build: island },
     { id: "city", name: "Tiny city", category: "Places", build: tinyCity },
+    { id: "city-night", name: "City at night", category: "Places", build: cityAtNight },
     { id: "solar", name: "Solar system", category: "Places", build: solarSystem },
     { id: "stonehenge", name: "Stonehenge", category: "Places", build: stonehenge },
     { id: "staircase", name: "Spiral staircase", category: "Places", build: spiralStaircase },
     { id: "forest", name: "Low-poly forest", category: "Places", build: lowPolyForest },
+    { id: "misty-forest", name: "Misty forest", category: "Places", build: mistyForest },
     { id: "snowman", name: "Snowman", category: "Places", build: snowman },
     { id: "lighthouse", name: "Lighthouse", category: "Places", build: lighthouse },
     { id: "pyramids", name: "Pyramids", category: "Places", build: pyramids },

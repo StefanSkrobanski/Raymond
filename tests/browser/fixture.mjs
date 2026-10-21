@@ -15,7 +15,13 @@ const GRID = Texture.procedural(64, 64, (u, v) => {
     return new Vec3((i + 1) / 4, (j + 1) / 4, ((i + j) % 2) * 0.8 + 0.1);
 });
 
+// Bumps for normal maps, and a lamp's pattern, different across and down,
+// so a lamp's light shows which way round the pattern is.
+const BUMPS = Texture.normalMap(64, 64, (u, v) => 0.03 * Math.sin(u * Math.PI * 4) * Math.cos(v * Math.PI * 6));
+const PATTERN = Texture.procedural(64, 64, (u, v) => new Vec3(1 - 0.9 * u, 0.3 + 0.4 * v, 0.1 + 0.9 * u * v));
+
 const BLACK = new Vec3(0, 0, 0);
+const WHITE = new Vec3(1, 1, 1);
 const WHITE_SKY = new Sky({ zenith: new Vec3(1, 1, 1), horizon: new Vec3(1, 1, 1), ground: new Vec3(1, 1, 1) });
 const FLOOR_ALBEDO = 0.5;
 
@@ -110,6 +116,83 @@ const SCENES = {
         camera: { position: new Vec3(0.8, 2.6, 3.8), target: new Vec3(0, 0.4, 0), fov: Math.PI / 3 },
     }),
 
+    // Every kind of primitive with bumps, for comparing the GPU's normal
+    // maps with the CPU's.
+    bumpy: () => ({
+        scene: new Scene({ sky: Sky.black() }).add(
+            new Quad(new Vec3(-10, 0, 10), new Vec3(20, 0, 0), new Vec3(0, 0, -20), Material.diffuse(WHITE).withTexture(GRID, 6).withNormalMap(BUMPS, 1.5)),
+            new Sphere(new Vec3(-1.0, 0.7, 0), 0.7, Material.diffuse(WHITE).withNormalMap(BUMPS, 2),
+                { rotation: Mat4.rotateZ(0.4).multiplyMat4(Mat4.rotateY(1.0)) }),
+            Box.fromCorners(new Vec3(0.3, 0, -0.9), new Vec3(1.3, 1.0, 0.1), Material.plastic(WHITE).withTexture(GRID, new Vec2(1, 2)).withNormalMap(BUMPS, 2), 0.5),
+            Mesh.torus(Material.diffuse(WHITE).withTexture(GRADIENT, 3).withNormalMap(BUMPS, 2), { radius: 0.4, tube: 0.18, segments: 32, sides: 16 })
+                .transformed(Mat4.translate(0.6, 0.35, 1.0).multiplyMat4(Mat4.rotateX(1.1)))),
+        camera: { position: new Vec3(0.8, 2.6, 3.8), target: new Vec3(0, 0.4, 0), fov: Math.PI / 3 },
+    }),
+
+    // Lamps with patterns on them, seen directly, for comparing the GPU's
+    // lookups with the CPU's.
+    patternedLamps: () => ({
+        scene: new Scene({ sky: Sky.black() }).add(
+            new Quad(new Vec3(-1.5, -1, 0), new Vec3(1.4, 0, 0), new Vec3(0, 2, 0), Material.light(WHITE).withEmission(WHITE, 1, PATTERN)),
+            new Sphere(new Vec3(0.8, 0, 0), 0.8, Material.light(WHITE).withEmission(WHITE, 1, PATTERN), { rotation: Mat4.rotateY(0.7) })),
+        camera: { position: new Vec3(0, 0, 2.6), target: new Vec3(0, 0, 0), fov: Math.PI / 3 },
+    }),
+
+    // A patterned lamp over a floor: sampled as a light, or (glowing but
+    // not a light) only found by bouncing. The two should agree, patch by
+    // patch.
+    patternedLamp: (as) => ({
+        scene: new Scene({ sky: Sky.black() }).add(
+            floor(),
+            new Quad(new Vec3(-1.0, 1.2, -1.5), new Vec3(2.0, 0, 0), new Vec3(0, 0, 1.4),
+                (as == "light" ? Material.light(WHITE) : Material.diffuse(BLACK)).withEmission(WHITE, 4, PATTERN))),
+        camera: LOOK_DOWN,
+    }),
+
+    // Fog that scatters everything it meets, in a uniform white sky: light
+    // is neither made nor lost, so it's as bright as the sky.
+    furnaceFog: () => ({
+        scene: new Scene({ sky: WHITE_SKY }).add(new Sphere(new Vec3(0, 0, 0), 1, Material.volume(WHITE, 2.0, 0.5))),
+        camera: { position: new Vec3(0, 0, 3.2), target: new Vec3(0, 0, 0), fov: Math.PI / 3 },
+    }),
+
+    // Smoke that absorbs everything it meets, against a white sky: the
+    // light through it falls off exactly as exp(-density × distance).
+    blackSmoke: () => ({
+        scene: new Scene({ sky: WHITE_SKY }).add(
+            new Sphere(new Vec3(-0.7, 0, 0), 0.8, Material.volume(BLACK, 1.5)),
+            new Box(Mat4.translate(0.6, 0, 0).multiplyMat4(Mat4.rotateY(0.6)).multiplyMat4(Mat4.rotateX(0.4)).multiplyMat4(Mat4.scale(0.6, 0.5, 0.4)), Material.volume(BLACK, 1.5))),
+        camera: { position: new Vec3(0, 0, 3.2), target: new Vec3(0, 0, 0), fov: Math.PI / 3 },
+    }),
+
+    // A ball of light in fog over a floor: sampled as a light, through the
+    // fog, or as a mesh, found only by scattering. The two should agree.
+    lampInFog: (as) => ({
+        scene: new Scene({ sky: Sky.black() }).add(
+            floor(),
+            Box.fromCorners(new Vec3(-3, 0, -3), new Vec3(3, 2.5, 2), Material.volume(new Vec3(0.9, 0.9, 0.9), 0.5, 0.4)),
+            as == "light" ?
+                new Sphere(new Vec3(0, 1.4, -0.5), 0.6, Material.light(WHITE, 3.0)) :
+                Mesh.icosphere(Material.light(WHITE, 3.0), 5).transformed(Mat4.translate(0, 1.4, -0.5).multiplyMat4(Mat4.scale(0.6, 0.6, 0.6)))),
+        camera: LOOK_DOWN,
+    }),
+
+    // Glass that splits colours, in a uniform white sky: every wavelength
+    // gets through, so it still looks white.
+    furnaceDispersive: () => ({
+        scene: new Scene({ sky: WHITE_SKY }).add(new Sphere(new Vec3(0, 0, 0), 1, Material.glass(1.5, WHITE, 20))),
+        camera: { position: new Vec3(0, 0, 3.2), target: new Vec3(0, 0, 0), fov: Math.PI / 3 },
+    }),
+
+    // A strip of white light seen through a glass ball, plain or splitting
+    // colours, which fringes the strip's edges.
+    stripThroughGlass: (abbe) => ({
+        scene: new Scene({ sky: Sky.black() }).add(
+            new Quad(new Vec3(-0.3, -2, -3), new Vec3(0.6, 0, 0), new Vec3(0, 4, 0), Material.light(WHITE, 1.0)),
+            new Sphere(new Vec3(0, 0, 0), 1, Material.glass(1.5, WHITE, Number(abbe)))),
+        camera: { position: new Vec3(0, 0, 3.2), target: new Vec3(0, 0, 0), fov: Math.PI / 3 },
+    }),
+
     lightAsMesh: (material) => ({
         scene: new Scene({ sky: Sky.black() }).add(
             floor(MATERIALS[material]),
@@ -163,15 +246,20 @@ async function trace(name, { arg, spp = 16, bounces = 8, view = "color", size = 
     const denoised = denoise ? Array.from(await renderer.readPixels({ denoised: true })) : null;
 
     const hits = [];
+    const rays = [];
     for (let y = 0; y < size; ++y) {
         for (let x = 0; x < size; ++x) {
             const ray = camera.pixelRay(x, y, size, size);
+            rays.push({ origin: [ray.origin.x, ray.origin.y, ray.origin.z], direction: [ray.direction.x, ray.direction.y, ray.direction.z] });
             const hit = scene.raycast(ray.origin, ray.direction);
-            // The surface's colour as the CPU works it out.
+            // The surface's colour, or a lamp's light, as the CPU works it
+            // out.
             const m = hit?.material;
-            const color = m && (m.texture ?
-                m.color.multiply(m.texture.sample(hit.uv.x * m.textureScale.x, hit.uv.y * m.textureScale.y)) :
-                m.color);
+            /** @param {Texture} t */
+            const at = (t) => t.sample(hit.uv.x * m.textureScale.x, hit.uv.y * m.textureScale.y);
+            const color = m && (m.type == "light" ?
+                (m.emissionTexture ? m.emission.multiply(at(m.emissionTexture)) : m.emission) :
+                (m.texture ? m.color.multiply(at(m.texture)) : m.color));
             hits.push(hit && {
                 object: scene.objects.indexOf(hit.object),
                 distance: hit.distance,
@@ -182,7 +270,7 @@ async function trace(name, { arg, spp = 16, bounces = 8, view = "color", size = 
         }
     }
 
-    return { pixels, denoised, hits, samples: renderer.samples };
+    return { pixels, denoised, hits, rays, samples: renderer.samples };
 }
 
 Object.assign(window, { trace, ready: true });

@@ -1,5 +1,5 @@
 import { Box, Mat4, Material, Quad, Scene, Sky, Sphere, Vec3, hexColor } from "../src/index.mjs";
-import { planks, plaster } from "./textures.mjs";
+import { planks, planksBumps, plaster, plasterBumps } from "./textures.mjs";
 
 // The room: x and z from -3 to 3, y from 0 to 3, with a window in the
 // x = -3 wall from z -1.2 to 1.2 and y 0.7 to 2.5.
@@ -27,8 +27,8 @@ export function slats() {
 
 /**
  * A quiet room, lit only by low sun through a Venetian blind: bars of
- * sunlight on the floor and wall, and everything else lit by the light
- * they bounce.
+ * sunlight on the floor and wall, beams of it through the dusty air, and
+ * everything else lit by the light they bounce.
  */
 export function sunbeams() {
 
@@ -43,8 +43,8 @@ export function sunbeams() {
         }),
     });
 
-    const wall = Material.diffuse(new Vec3(1, 1, 1)).withTexture(plaster(), 3);
-    const floor = Material.plastic(new Vec3(1, 1, 1), 0.4).withTexture(planks(), 2);
+    const wall = Material.diffuse(new Vec3(1, 1, 1)).withTexture(plaster(), 3).withNormalMap(plasterBumps(), 2);
+    const floor = Material.plastic(new Vec3(1, 1, 1), 0.4).withTexture(planks(), 2).withNormalMap(planksBumps());
 
     scene.add(
         new Quad(new Vec3(-3, 0, 3), new Vec3(6, 0, 0), new Vec3(0, 0, -6), floor),
@@ -61,6 +61,11 @@ export function sunbeams() {
         new Quad(new Vec3(-40, -0.01, 40), new Vec3(37, 0, 0), new Vec3(0, 0, -80), Material.diffuse(hexColor("#6c7f4a"))));
 
     scene.add(...slats());
+
+    // Dust in the air, so the beams show: a faint haze filling the room,
+    // scattering mostly onwards, so they glow brightest looking towards
+    // the window.
+    scene.add(Box.fromCorners(new Vec3(-2.99, 0.01, -2.99), new Vec3(2.99, 2.99, 2.99), Material.volume(new Vec3(0.95, 0.95, 0.95), 0.15, 0.7)));
 
     // Some furniture to catch the light.
     scene.add(

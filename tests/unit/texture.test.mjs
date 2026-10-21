@@ -63,7 +63,7 @@ test("packed materials say which texture they use, shared between materials", ()
         new Sphere(new Vec3(0, 0, 0), 1, a), new Sphere(new Vec3(3, 0, 0), 1, b), new Sphere(new Vec3(6, 0, 0), 1, plain)).pack();
 
     const f = new Float32Array(packed.materials), u = new Uint32Array(packed.materials);
-    const at = (m) => packed.materialList.indexOf(m) * 16;
+    const at = (m) => packed.materialList.indexOf(m) * 24;
 
     assert.deepEqual(packed.textures, [QUADRANTS]);
     assert.equal(u[at(a) + 13], 0);
@@ -128,9 +128,9 @@ test("triangles interpolate their vertices' texture coordinates", () => {
         { shading: "flat", uvs: [new Vec2(0, 1), new Vec2(1, 1), new Vec2(0, 0)] });
     const packed = new Scene().add(mesh).pack();
 
-    // A flat triangle with coordinates still gets a block, marked as having
-    // no normals.
-    assert.equal(packed.attributes[3 * 4 + 3], 0);
+    // A flat triangle with coordinates still gets a block, flagged as
+    // having texture coordinates (2) but no normals (1).
+    assert.equal(packed.attributes[3 * 4 + 3], 2);
 
     const uv = new Scene().add(mesh).raycast(new Vec3(0.25, 0.5, 5), new Vec3(0, 0, -1)).uv;
     assertClose(uv.x, 0.25, "u", 1e-6);
