@@ -584,6 +584,53 @@ test("pausing stops the samples, and a camera move still redraws", async () => {
     await context.close();
 });
 
+test("moving the camera shows a fast preview, then the full image once it stops", async () => {
+
+    const { page, errors, context } = await open("index.html");
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 2, null, { timeout: 60000 });
+
+    const full = await page.evaluate(() => ({ width: document.getElementById("view").width, bounces: window.raymond.renderer.maxBounces }));
+    const now = () => page.evaluate(() => ({
+        width: document.getElementById("view").width,
+        bounces: window.raymond.renderer.maxBounces,
+        samplesPerFrame: window.raymond.renderer.samplesPerFrame,
+        stats: document.getElementById("stats").textContent,
+    }));
+
+    // Mid-drag: smaller, fewer bounces, a sample a frame, and it says so.
+    await page.mouse.move(240, 160);
+    await page.mouse.down();
+    await page.mouse.move(260, 160, { steps: 4 });
+    await page.waitForTimeout(50);
+    const during = await now();
+    assert.ok(during.width < full.width, `preview width ${during.width} of ${full.width}`);
+    assert.ok(during.bounces <= 3 && during.samplesPerFrame == 1);
+    assert.match(during.stats, /preview/);
+
+    // Held still, then let go: back to full quality.
+    await page.waitForTimeout(600);
+    await page.mouse.up();
+    await page.waitForFunction((w) => document.getElementById("view").width == w, full.width, { timeout: 30000 });
+    const after = await now();
+    assert.equal(after.bounces, full.bounces);
+    assert.doesNotMatch(after.stats, /preview/);
+
+    // With the preview turned off, moving keeps the full image.
+    await page.click("#settings-button");
+    await page.click("#fast-preview");
+    await page.mouse.move(240, 160);
+    await page.mouse.down();
+    await page.mouse.move(270, 170, { steps: 4 });
+    const off = await now();
+    await page.mouse.up();
+    assert.equal(off.width, full.width);
+    assert.equal(off.bounces, full.bounces);
+    assert.equal(await page.evaluate(() => window.raymond.settings.fast_preview), false);
+
+    assert.deepEqual(errors, []);
+    await context.close();
+});
+
 test("the settings panel changes the scene, view and resolution, and remembers them", async () => {
 
     const { page, errors, context } = await open("index.html");
