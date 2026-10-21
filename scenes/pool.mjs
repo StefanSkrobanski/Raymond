@@ -5,20 +5,26 @@ import { Mat4, Material, Mesh, Quad, Scene, Sky, Sphere, Vec3, hexColor } from "
 const LENGTH = 6.0, WIDTH = 4.0, DEPTH = 1.2, WATER = -0.15;
 
 /**
- * The height of the water's surface at (x, z): a few wave trains crossing.
+ * The height of the water's surface at (x, z): a few wave trains crossing,
+ * long swells and short ripples. A ripple focuses sunlight like a lens of
+ * focal length about 4 / (amplitude × wavenumber²) under water, so these
+ * short ones, about a metre, draw the bright net on the pool's floor.
  * @param {number} x
  * @param {number} z
  */
 export function waveHeight(x, z) {
     return WATER +
-        0.025 * Math.sin(2.1 * x + 0.7 * z) +
-        0.018 * Math.sin(-1.3 * x + 2.9 * z + 1.0) +
-        0.010 * Math.sin(4.7 * x - 3.1 * z + 2.0);
+        0.02 * Math.sin(2.1 * x + 0.7 * z) +
+        0.014 * Math.sin(-1.3 * x + 2.9 * z + 1.0) +
+        0.008 * Math.sin(9.0 * x - 5.5 * z + 2.0) +
+        0.007 * Math.sin(-4.0 * x - 10.5 * z + 0.5) +
+        0.006 * Math.sin(11.0 * x + 6.0 * z + 4.0);
 }
 
 /**
  * A swimming pool in the sun. The rippling water bends the sunlight into
- * caustics, the bright wobbling net on the tiles.
+ * caustics, the bright wobbling net on the tiles, which photon mapping
+ * draws, from the sun through the water and back out to the camera.
  */
 export function swimmingPool() {
 
@@ -28,11 +34,12 @@ export function swimmingPool() {
             horizon: new Vec3(0.75, 0.85, 1.0),
             sunStrength: 4.0,
             sunDirection: new Vec3(0.3, 0.9, 0.25),
-            sunSize: 0.15,
+            sunSize: 0.02,
         }),
     });
 
-    const tiles = Material.checkered(hexColor("#e8f4f8"), hexColor("#3f8fc0"), 0.25);
+    // Pale tiles, two close blues, so the caustics show on them.
+    const tiles = Material.checkered(hexColor("#cfe9f4"), hexColor("#a8d3e8"), 0.25);
     const deck = Material.checkered(hexColor("#d9cbb0"), hexColor("#cdbd9f"), 0.6);
     const x0 = -LENGTH / 2, x1 = LENGTH / 2, z0 = -WIDTH / 2, z1 = WIDTH / 2;
 
@@ -57,7 +64,7 @@ export function swimmingPool() {
             const z = z1 - v * WIDTH;
             return new Vec3(x, waveHeight(x, z), z);
         },
-        120, 80, Material.glass(1.33, hexColor("#e4fbff"))));
+        240, 160, Material.glass(1.33, hexColor("#e4fbff"))));
 
     // A beach ball and a rubber ring, floating.
     scene.add(
