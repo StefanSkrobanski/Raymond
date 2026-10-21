@@ -4,7 +4,7 @@
 // types aren't just `any`.
 
 import {
-    Box, Camera, Mat4, Material, Mesh, OrbitControls, Quad, Renderer, Scene, Sky, Sphere, Texture, Vec2, Vec3,
+    Box, Camera, Mat4, Material, Mesh, OrbitControls, Quad, Renderer, Scene, Sky, Sphere, Texture, Vec2, Vec3, EnvironmentMap,
     hexColor, type View,
 } from "@stefanskrobanski/raymond";
 
@@ -77,4 +77,15 @@ bumpy.withNormalMap(bumps, "deep");
 // @ts-expect-error: volumes need a density
 Material.volume(new Vec3(1, 1, 1));
 
-export { pixels, denoised, distance, stick, loaded, uv, redder, glows };
+const studioLights: EnvironmentMap = EnvironmentMap.procedural(256, 128, (d) => new Vec3(d.y > 0.8 ? 10 : 0.1, 0.1, 0.1));
+const photographed: Promise<EnvironmentMap> = EnvironmentMap.load("sky.hdr");
+const fromFile: EnvironmentMap = EnvironmentMap.fromHDR(new Uint8Array(0));
+scene.sky = Sky.environment(studioLights, 1.5, Math.PI / 2);
+scene.sky = scene.sky.with({ environmentStrength: 2, sunStrength: 3 });
+const radiance: Vec3 = scene.sky.radiance(new Vec3(0, 1, 0));
+const density: number = studioLights.pdf(new Vec3(0, 1, 0));
+
+// @ts-expect-error: an environment is an EnvironmentMap, not a Texture
+Sky.environment(checks);
+
+export { pixels, denoised, distance, stick, loaded, uv, redder, glows, photographed, fromFile, radiance, density };

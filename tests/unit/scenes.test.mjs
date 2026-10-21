@@ -28,7 +28,8 @@ test("every scene is lit", () => {
 
         const lamps = scene.objects.some((o) => o.material.emissive);
         const sky = scene.sky;
-        const glow = [sky.zenith, sky.horizon].some((c) => c.x + c.y + c.z > 0) || sky.sunStrength > 0;
+        const glow = sky.environment ? sky.environmentStrength > 0 :
+            [sky.zenith, sky.horizon].some((c) => c.x + c.y + c.z > 0) || sky.sunStrength > 0;
 
         assert.ok(lamps || glow, `${demo.id} has a light or a sky`);
     }

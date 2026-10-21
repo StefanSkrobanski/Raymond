@@ -11,19 +11,19 @@ A progressive path tracer for WebGPU, in plain JavaScript ES modules with no dep
 - **Materials:** diffuse, metal and plastic (GGX microfacets, from polished to rough), glass (exact Fresnel, refraction, tint, and optionally dispersion, which splits white light into rainbows by tracing a wavelength per path), lights, glowing surfaces, and 3D checkerboards.
 - **Fog, smoke and haze:** spheres and boxes filled with a scattering medium (Henyey-Greenstein phase function, sampled exactly and aimed at lights through the fog), for sunbeams and mist.
 - **Textures** on every shape: from image files (`Texture.load`) or drawn by a function (`Texture.procedural`), filtered and repeating, with spheres mapped by latitude and longitude, box faces by their size in world units, and meshes by their own texture coordinates (generated for the built-in shapes). Normal maps add bumps (made from a height function with `Texture.normalMap`), and emission textures make patterns glow: lit windows, city lights, the sun's surface. The demo's wood, marble, brick, stone, planets and their bumps are all procedural.
-- **Lights:** emissive quads and spheres, sampled directly; a sky gradient; a sun with a soft-edged disc.
+- **Lights:** emissive quads and spheres, sampled directly; a sky gradient; a sun with a soft-edged disc; and HDR environment maps (Radiance .hdr panoramas, or drawn in code), importance-sampled by brightness, so a bright sun in a photographed sky lights the scene cleanly.
 - **A denoiser** that clears the grain from the first few samples: an edge-avoiding à-trous wavelet filter guided by each pixel's albedo, normal and distance, and steered by an estimate of its noise (as in SVGF), so it backs off as the samples build up and the image still converges to the exact answer.
 - **A thin-lens camera** with depth of field, and **inspection views** of albedo, normals and depth.
 - **A fast preview while you move the camera** in the demo: fewer bounces at a lower resolution, which adapts to keep about 30 frames a second on whatever device it's on, then the full image the moment you stop.
 - **Orbit controls** for mouse, touch and pen, adapted from [Styx](https://github.com/StefanSkrobanski/Styx), whose maths library Raymond also uses.
 - **A CPU raycast** with exactly the shader's tests, on the same packed data, for picking (tap to focus) and for testing the GPU.
 
-The demo app has 47 scenes in five groups:
+The demo app has 50 scenes in five groups:
 
-- **Classics:** two Cornell boxes, a field of spheres, a material chart, a texture gallery and Eric Haines's sphereflake.
+- **Classics:** two Cornell boxes, a field of spheres, a material chart, a texture gallery, a studio shot of chrome and glass and Eric Haines's sphereflake.
 - **Light and glass:** a glass garden, a swimming pool and a coffee cup's caustics, cut gems, a hall of mirrors, the inside of a mirror ball, sunbeams through a blind, neon, a crystal cave, candlelight, a magnifying glass, a glass of water and a prism.
 - **Objects:** a still life, Newton's cradle, chess, bowling, billiards, a Rubik's cube, toy bricks, a pendulum wave, a domino spiral, DNA, an atom and a rocket launch.
-- **Places:** an island at sunset, a tiny city by day and by night, the solar system, Stonehenge, a spiral staircase, a low-poly forest (and the same forest on a misty morning), a snowman, a lighthouse, the pyramids and hot-air balloons.
+- **Places:** an island at sunset, an alpine meadow, sunset on the water, a tiny city by day and by night, the solar system, Stonehenge, a spiral staircase, a low-poly forest (and the same forest on a misty morning), a snowman, a lighthouse, the pyramids and hot-air balloons.
 - **Maths:** a Menger sponge, seashells, a Sierpinski tetrahedron, and a Möbius strip, Klein bottle and Dini's surface.
 
 ## Using the library
@@ -80,6 +80,9 @@ const screen = Material.diffuse(new Vec3(0, 0, 0)).withEmission(new Vec3(1, 1, 1
 
 // Glass that splits colours: the last argument is its Abbe number (lower is more).
 const prism = Material.glass(1.65, new Vec3(1, 1, 1), 20);
+
+// Light from an HDR panorama all round, turned a quarter.
+scene.sky = Sky.environment(await EnvironmentMap.load("meadow.hdr"), 1.0, Math.PI / 2);
 
 // Haze filling a box: colour (what it scatters rather than absorbs), density, anisotropy.
 scene.add(Box.fromCorners(new Vec3(-5, 0, -5), new Vec3(5, 3, 5), Material.volume(new Vec3(0.95, 0.95, 0.95), 0.1, 0.6)));

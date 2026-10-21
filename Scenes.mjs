@@ -39,6 +39,7 @@ import { snowman } from "./scenes/snowman.mjs";
 import { solarSystem } from "./scenes/solar.mjs";
 import { mirrorBall } from "./scenes/mirrorball.mjs";
 import { prism } from "./scenes/prism.mjs";
+import { alpineMeadow, studioShot, sunsetWater } from "./scenes/skies.mjs";
 import { sphereflakeScene } from "./scenes/sphereflake.mjs";
 import { sphereField } from "./scenes/spheres.mjs";
 import { spiralStaircase } from "./scenes/staircase.mjs";
@@ -64,6 +65,7 @@ export const SCENES = [
     { id: "materials", name: "Material chart", category: "Classics", build: materialChart },
     { id: "sphereflake", name: "Sphereflake", category: "Classics", build: sphereflakeScene },
     { id: "textures", name: "Texture gallery", category: "Classics", build: textureGallery },
+    { id: "studio", name: "Studio: chrome and glass", category: "Classics", build: studioShot },
     { id: "glass", name: "Glass garden", category: "Light and glass", build: glassGarden },
     { id: "pool", name: "Swimming pool", category: "Light and glass", build: swimmingPool },
     { id: "gems", name: "Gems", category: "Light and glass", build: gems },
@@ -90,6 +92,8 @@ export const SCENES = [
     { id: "atom", name: "Atom", category: "Objects", build: atom },
     { id: "rocket", name: "Rocket launch", category: "Objects", build: rocketLaunch },
     { id: "island", name: "Island at sunset", category: "Places", build: island },
+    { id: "alpine", name: "Alpine meadow", category: "Places", build: alpineMeadow },
+    { id: "sunset-water", name: "Sunset on the water", category: "Places", build: sunsetWater },
     { id: "city", name: "Tiny city", category: "Places", build: tinyCity },
     { id: "city-night", name: "City at night", category: "Places", build: cityAtNight },
     { id: "solar", name: "Solar system", category: "Places", build: solarSystem },

@@ -11,6 +11,7 @@ export { Quad } from "./Quad.mjs";
 export { Box } from "./Box.mjs";
 export { Mesh } from "./Mesh.mjs";
 export { Texture } from "./Texture.mjs";
+export { EnvironmentMap } from "./EnvironmentMap.mjs";
 export { Sky } from "./Sky.mjs";
 export { Scene, PRIMITIVE_KINDS, NONE } from "./Scene.mjs";
 export { BVH } from "./BVH.mjs";

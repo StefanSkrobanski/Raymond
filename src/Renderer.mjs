@@ -89,6 +89,15 @@ export class Renderer {
     #uploaded_version = -1;
     #light_count = 0;
     #volume_count = 0;
+    // The sky's environment map, and its table for picking directions, as
+    // uploaded, and which environment they came from (undefined: none yet).
+    /** @type {GPUTexture | null} */
+    #env_map = null;
+    /** @type {GPUTexture | null} */
+    #env_table = null;
+    /** @type {import("./EnvironmentMap.mjs").EnvironmentMap | null | undefined} */
+    #uploaded_environment = undefined;
+    #env_sampler;
     /** @type {GPUTexture | null} */
     #normal_maps = null;
 
@@ -140,6 +149,15 @@ export class Renderer {
             minFilter: "linear",
             addressModeU: "repeat",
             addressModeV: "repeat",
+        });
+
+        // Round the horizon, but not over the poles: EnvironmentMap.sample
+        // does the same.
+        this.#env_sampler = device.createSampler({
+            magFilter: "linear",
+            minFilter: "linear",
+            addressModeU: "repeat",
+            addressModeV: "clamp-to-edge",
         });
 
         // prepare, the à-trous passes, then compose.
@@ -311,6 +329,9 @@ export class Renderer {
         if (scene != this.#uploaded_scene || scene.version != this.#uploaded_version)
             this.#upload(scene);
 
+        if (scene.sky.environment !== this.#uploaded_environment)
+            this.#uploadEnvironment(scene.sky.environment);
+
         if (!this.#accum || width != this.#width || height != this.#height)
             this.#resize(width, height);
 
@@ -398,6 +419,8 @@ export class Renderer {
             buffer.destroy();
         this.#textures?.destroy();
         this.#normal_maps?.destroy();
+        this.#env_map?.destroy();
+        this.#env_table?.destroy();
         this.#accum?.destroy();
         this.#params_buffer.destroy();
         this.#context.unconfigure();
@@ -486,6 +509,49 @@ export class Renderer {
         return texture;
     }
 
+    // Uploads the environment map as half floats, and its table for picking
+    // directions as full ones. Without one, black stand-ins are bound, which
+    // the shader never reads, since it's told there's no environment.
+    /** @param {import("./EnvironmentMap.mjs").EnvironmentMap | null} environment */
+    #uploadEnvironment(environment) {
+
+        this.#env_map?.destroy();
+        this.#env_table?.destroy();
+
+        const map = environment ?? { width: 1, height: 1, data: new Float32Array(3) };
+        const table = environment?.importance() ?? { width: 1, height: 0, data: new Float32Array(1) };
+
+        const rgba = new Uint16Array(map.width * map.height * 4);
+        for (let i = 0; i < map.width * map.height; ++i) {
+            for (let c = 0; c < 3; ++c)
+                rgba[i * 4 + c] = toHalf(map.data[i * 3 + c]);
+            rgba[i * 4 + 3] = toHalf(1.0);
+        }
+
+        this.#env_map = this.#device.createTexture({
+            label: "environment",
+            size: { width: map.width, height: map.height },
+            format: "rgba16float",
+            usage: TEXTURE_BINDING | TEXTURE_COPY_DST,
+        });
+        this.#device.queue.writeTexture({ texture: this.#env_map }, rgba,
+            { bytesPerRow: map.width * 8, rowsPerImage: map.height }, { width: map.width, height: map.height });
+
+        this.#env_table = this.#device.createTexture({
+            label: "environment table",
+            size: { width: table.width, height: table.height + 1 },
+            format: "r32float",
+            usage: TEXTURE_BINDING | TEXTURE_COPY_DST,
+        });
+        this.#device.queue.writeTexture({ texture: this.#env_table }, table.data,
+            { bytesPerRow: table.width * 4, rowsPerImage: table.height + 1 }, { width: table.width, height: table.height + 1 });
+
+        this.#uploaded_environment = environment;
+        this.#samples = 0;
+        if (this.#accum)
+            this.#bind();
+    }
+
     /**
      * @param {number} width
      * @param {number} height
@@ -533,6 +599,9 @@ export class Renderer {
                 { binding: 9, resource: /** @type {GPUTexture} */ (this.#textures).createView({ dimension: "2d-array" }) },
                 { binding: 10, resource: this.#sampler },
                 { binding: 11, resource: /** @type {GPUTexture} */ (this.#normal_maps).createView({ dimension: "2d-array" }) },
+                { binding: 12, resource: /** @type {GPUTexture} */ (this.#env_map).createView() },
+                { binding: 13, resource: /** @type {GPUTexture} */ (this.#env_table).createView() },
+                { binding: 14, resource: this.#env_sampler },
             ],
         });
 
@@ -610,6 +679,8 @@ export class Renderer {
 
         u[36] = VIEWS[this.#view];
         u[37] = this.#volume_count;
+        f[38] = sky.environment ? sky.environmentStrength : 0.0;
+        f[39] = sky.environmentRotation;
         u[40] = width;
         u[41] = height;
 
@@ -709,4 +780,27 @@ export class Renderer {
 
         return module;
     }
+}
+
+// The nearest half-precision float to x, as its 16 bits, for rgba16float
+// textures: large values become the largest half (65504) rather than
+// infinity, and tiny ones zero.
+/** @param {number} x */
+function toHalf(x) {
+
+    if (!(x > 0.0))
+        return 0;
+    if (x >= 65504.0)
+        return 0x7bff;
+    if (x < 6.1035e-5)
+        return Math.round(x / 5.9605e-8); // subnormal
+
+    const exponent = Math.floor(Math.log2(x));
+    let mantissa = Math.round((x / 2 ** exponent - 1.0) * 1024);
+    let e = exponent + 15;
+    if (mantissa == 1024) {
+        mantissa = 0;
+        e++;
+    }
+    return (e << 10) | mantissa;
 }
