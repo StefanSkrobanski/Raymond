@@ -32,7 +32,11 @@ const TEXTURE_BINDING = 0x04;
 // one's size, up to this.
 const MAX_TEXTURE_SIZE = 2048;
 
-const PARAMS_BYTES = 192;
+const PARAMS_BYTES = 208;
+// Photon mapping's hash table of grid cells and the most photons it stores
+// a frame: see shaders.mjs.
+const PHOTON_TABLE = 1048576;
+const PHOTON_CAPACITY = 524288;
 // The denoiser's à-trous passes, each spreading twice as far as the last.
 const ATROUS_STEPS = [1, 2, 4, 8, 16];
 const STORAGE_READ = /** @type {GPUBufferBindingType} */ ("read-only-storage");
@@ -59,7 +63,7 @@ export class Renderer {
     #canvas;
     #format;
 
-    /** @type {{ trace: GPUComputePipeline, light: GPUComputePipeline, resolve: GPUComputePipeline }} */
+    /** @type {{ trace: GPUComputePipeline, light: GPUComputePipeline, resolve: GPUComputePipeline, gather: GPUComputePipeline }} */
     #trace_pipelines;
     #display_pipeline;
     #denoise_pipelines;
@@ -95,6 +99,14 @@ export class Renderer {
     #light_group = null;
     /** @type {GPUBindGroup | null} */
     #resolve_group = null;
+    /** @type {GPUBindGroup | null} */
+    #gather_group = null;
+    // Photon mapping's grid of lists, and its photons, made when first
+    // needed.
+    /** @type {GPUBuffer | null} */
+    #photon_heads = null;
+    /** @type {GPUBuffer | null} */
+    #photons = null;
 
     #samples = 0;
     #params = new ArrayBuffer(PARAMS_BYTES);
@@ -145,7 +157,7 @@ export class Renderer {
      * @param {HTMLCanvasElement | OffscreenCanvas} canvas
      * @param {GPUCanvasContext} context
      * @param {GPUTextureFormat} format
-     * @param {{ trace: GPUComputePipeline, light: GPUComputePipeline, resolve: GPUComputePipeline }} trace_pipelines
+     * @param {{ trace: GPUComputePipeline, light: GPUComputePipeline, resolve: GPUComputePipeline, gather: GPUComputePipeline }} trace_pipelines
      * @param {GPURenderPipeline} display_pipeline
      * @param {{ prepare: GPUComputePipeline, atrous: GPUComputePipeline, compose: GPUComputePipeline }} denoise_pipelines
      */
@@ -385,6 +397,10 @@ export class Renderer {
 
         const encoder = this.#device.createCommandEncoder();
 
+        // Photon mapping's grid starts each frame empty.
+        if (caustics)
+            encoder.clearBuffer(/** @type {GPUBuffer} */ (this.#photon_heads));
+
         const compute = encoder.beginComputePass();
         compute.setPipeline(this.#trace_pipelines.trace);
         compute.setBindGroup(0, this.#trace_group);
@@ -393,9 +409,12 @@ export class Renderer {
         if (caustics) {
             compute.setPipeline(this.#trace_pipelines.light);
             compute.setBindGroup(0, this.#light_group);
-            compute.dispatchWorkgroups(Math.ceil(Math.min(width * height * this.#samples_per_frame, 65535 * 64) / 64));
+            compute.dispatchWorkgroups(Math.ceil(Math.min(width * height * this.#samples_per_frame, PHOTON_CAPACITY) / 64));
             compute.setPipeline(this.#trace_pipelines.resolve);
             compute.setBindGroup(0, this.#resolve_group);
+            compute.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
+            compute.setPipeline(this.#trace_pipelines.gather);
+            compute.setBindGroup(0, this.#gather_group);
             compute.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
         }
 
@@ -474,6 +493,8 @@ export class Renderer {
             buffer.destroy();
         this.#textures?.destroy();
         this.#normal_maps?.destroy();
+        this.#photon_heads?.destroy();
+        this.#photons?.destroy();
         this.#env_map?.destroy();
         this.#env_table?.destroy();
         this.#accum?.destroy();
@@ -708,6 +729,17 @@ export class Renderer {
         const [guide_albedo, guide_normal, light_a, light_b, denoised, splats] = this.#pixel_buffers;
         const emitters = /** @type {GPUBuffer} */ (this.#emitters);
 
+        this.#photon_heads ??= this.#device.createBuffer({
+            label: "photon grid",
+            size: (PHOTON_TABLE + 1) * 4,
+            usage: BUFFER_STORAGE | BUFFER_COPY_DST,
+        });
+        this.#photons ??= this.#device.createBuffer({
+            label: "photons",
+            size: PHOTON_CAPACITY * 48,
+            usage: BUFFER_STORAGE,
+        });
+
         this.#light_group = this.#device.createBindGroup({
             layout: this.#trace_pipelines.light.getBindGroupLayout(0),
             entries: [
@@ -721,6 +753,25 @@ export class Renderer {
                 { binding: 11, resource: /** @type {GPUTexture} */ (this.#normal_maps).createView({ dimension: "2d-array" }) },
                 { binding: 15, resource: { buffer: splats } },
                 { binding: 16, resource: { buffer: emitters } },
+                { binding: 17, resource: { buffer: this.#photon_heads } },
+                { binding: 18, resource: { buffer: this.#photons } },
+            ],
+        });
+
+        this.#gather_group = this.#device.createBindGroup({
+            layout: this.#trace_pipelines.gather.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this.#params_buffer } },
+                { binding: 1, resource: { buffer: primitives } },
+                { binding: 2, resource: { buffer: nodes } },
+                { binding: 3, resource: { buffer: materials } },
+                { binding: 4, resource: { buffer: attributes } },
+                { binding: 6, resource: { buffer: accum } },
+                { binding: 9, resource: /** @type {GPUTexture} */ (this.#textures).createView({ dimension: "2d-array" }) },
+                { binding: 10, resource: this.#sampler },
+                { binding: 11, resource: /** @type {GPUTexture} */ (this.#normal_maps).createView({ dimension: "2d-array" }) },
+                { binding: 17, resource: { buffer: this.#photon_heads } },
+                { binding: 18, resource: { buffer: this.#photons } },
             ],
         });
 
@@ -847,6 +898,18 @@ export class Renderer {
         u[46] = this.#denoising() ? 1 : 0;
         u[47] = this.#caustics_active ? 1 : 0;
 
+        // Photon mapping's radius: about 3 pixels across where the camera
+        // sees the mirrors and glass, shrinking with each frame as
+        // progressive photon mapping's does (r² ∝ frames^-1/3), so the
+        // blur it leaves fades and the average converges. The grid's cells
+        // are twice the starting radius.
+        const sphere = this.#delta_sphere;
+        const distance = sphere ? Math.max(camera.position.subtract(sphere.centre).length(), sphere.radius) : 1;
+        const start = Math.max(3 * 2 * Math.tan(camera.fov / 2) * distance / height, 1e-5);
+        const frame = Math.floor(this.#samples / Math.max(this.#samples_per_frame, 1)) + 1;
+        f[48] = start * frame ** (-1 / 6);
+        f[49] = 2 * start;
+
         this.#device.queue.writeBuffer(this.#params_buffer, 0, this.#params);
     }
 
@@ -875,17 +938,22 @@ export class Renderer {
             compute: { module, entryPoint },
         });
 
-        const [trace, light, resolve] = await Promise.all([
+        const [trace, light, resolve, gather] = await Promise.all([
             device.createComputePipelineAsync({ label: "trace", layout: "auto", compute: { module, entryPoint: "main" } }),
             pipeline("light_trace", [
                 uniform(0), read(1), read(2), read(3), read(4),
                 array(9), entry(10, { sampler: { type: "filtering" } }), array(11),
-                write(15), read(16),
+                write(15), read(16), write(17), write(18),
             ]),
             pipeline("resolve_splats", [uniform(0), write(6), write(15)]),
+            pipeline("photon_gather", [
+                uniform(0), read(1), read(2), read(3), read(4), write(6),
+                array(9), entry(10, { sampler: { type: "filtering" } }), array(11),
+                write(17), write(18),
+            ]),
         ]);
 
-        return { trace, light, resolve };
+        return { trace, light, resolve, gather };
     }
 
     /**

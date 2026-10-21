@@ -517,6 +517,37 @@ for (const scene of ["causticLamp", "causticSun", "causticMirror"]) {
     });
 }
 
+test("photon mapping's caustics seen through glass agree with path tracing's", async () => {
+
+    // Through the pane, the floor's caustic is photon mapping's: biased
+    // by its blur, which shrinks with the samples.
+    const size = 32;
+    const mapped = await trace("causticThroughGlass", { spp: 512, size, bounces: 10, caustics: true });
+    const alone = await trace("causticThroughGlass", { spp: 4096, size, bounces: 10, caustics: false });
+
+    // The floor seen through the pane, clear of the ball: the thin pane
+    // barely shifts what's behind it, so follow each ray straight on.
+    const missesBall = ({ origin, direction }) => {
+        const oc = sub(origin, [0, 0.9, 0]);
+        const b = dot(oc, direction), c = dot(oc, oc) - 0.55 * 0.55;
+        return b * b - dot(direction, direction) * c < 0;
+    };
+    const pane = interior(mapped.hits, size, 3).filter((i) => mapped.rays[i].direction[1] < 0 && missesBall(mapped.rays[i]));
+    const brightness = (r, i) => mean(rgb(r.pixels, i));
+    assert.ok(pane.length > 300, `${pane.length} pixels of floor through the pane`);
+
+    const all = (r) => mean(pane.map((i) => brightness(r, i)));
+    assert.ok(Math.abs(all(mapped) / all(alone) - 1) < 0.04, `floor through the pane: mapped ${all(mapped)}, path traced ${all(alone)}`);
+
+    // The caustic: the brightest quarter of that floor. Photon mapping's
+    // blur spreads the spot a little at 512 samples (about 9% of it, at
+    // this size), less as samples build up.
+    const order = [...pane].sort((a, b) => brightness(alone, b) - brightness(alone, a));
+    const caustic = order.slice(0, Math.ceil(pane.length / 4));
+    const lit = (r) => mean(caustic.map((i) => brightness(r, i)));
+    assert.ok(Math.abs(lit(mapped) / lit(alone) - 1) < 0.15, `caustic: mapped ${lit(mapped)}, path traced ${lit(alone)}`);
+});
+
 // ---- The denoiser ----
 
 // The root mean square difference between two images' RGB.

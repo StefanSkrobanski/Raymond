@@ -235,6 +235,19 @@ const SCENES = {
         camera: LOOK_DOWN,
     }),
 
+    // A caustic seen through glass, for photon mapping: the lamp through a
+    // glass ball onto the floor, seen through a pane of glass. The lamp is
+    // big enough for path tracing alone to find it, slowly.
+    causticThroughGlass: () => ({
+        scene: new Scene({ sky: Sky.black() }).add(
+            floor(),
+            new Sphere(new Vec3(0, 0.9, 0), 0.5, Material.glass(1.5)),
+            new Sphere(new Vec3(0.3, 2.6, -0.2), 0.3, Material.light(WHITE, 20.0)),
+            Box.fromCorners(new Vec3(-3, 0, 1.6), new Vec3(3, 3.5, 1.62), Material.glass(1.5))),
+        // Looking steeply down, so the lamp is out of shot.
+        camera: { position: new Vec3(0, 2.4, 2.4), target: new Vec3(0, 0, 0), fov: Math.PI / 4 },
+    }),
+
     lightAsMesh: (material) => ({
         scene: new Scene({ sky: Sky.black() }).add(
             floor(MATERIALS[material]),

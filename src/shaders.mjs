@@ -2,7 +2,7 @@
 // with the library wherever it's served or bundled. Not part of the public
 // API.
 //
-// Uniform layout, shared by all the shaders and written by Renderer: 12
+// Uniform layout, shared by all the shaders and written by Renderer: 13
 // rows of 16 bytes. The first 168 bytes (rows 0-9 and width, height) decide
 // the image; if they change, the accumulated samples are thrown away.
 
@@ -20,6 +20,7 @@ struct Params {
     view: u32, volume_count: u32, env_strength: f32, env_rotation: f32,  // env_strength: 0 for no environment map
     width: u32, height: u32, sample_offset: u32, samples_per_frame: u32,
     total_samples: u32, exposure: f32, denoise: u32, caustics: u32,  // caustics: light tracing is on
+    photon_radius: f32, photon_cell: f32, _pad5: u32, _pad6: u32,     // photon mapping's gathering radius this frame, and its grid's cell size
 }
 
 const VIEW_COLOR = 0u;
@@ -88,6 +89,13 @@ struct Material {
 // Renderer.#writeEmitters).
 @group(0) @binding(15) var<storage, read_write> splats: array<atomic<u32>>;
 @group(0) @binding(16) var<storage, read> emitters: array<vec4f>;
+// For photon mapping: a hash table of grid cells, each the head of a list
+// of the photons in it (an index + 1, 0 for none), with the number stored
+// in the entry after the table; and the photons, three vec4s each: where
+// it landed (and the next in its cell's list, in w), its power, and the
+// direction it came from.
+@group(0) @binding(17) var<storage, read_write> photon_heads: array<atomic<u32>>;
+@group(0) @binding(18) var<storage, read_write> photons: array<vec4f>;
 
 // Normal maps, read as plain numbers rather than sRGB.
 @group(0) @binding(11) var normal_maps: texture_2d_array<f32>;
@@ -1053,10 +1061,12 @@ fn radiance(px: vec2f) -> vec3f {
     // Once a path meets glass that splits colours, it follows one
     // wavelength, in nanometres; 0 until then.
     var wavelength = 0.0;
-    // Whether the path so far is the camera, a surface that isn't a mirror
-    // or glass, then only mirrors and glass: with light tracing on, the
-    // light it would find at the end of that is light tracing's to count.
+    // Whether the path so far is the camera, any mirrors and glass, a
+    // surface that isn't, then only mirrors and glass: with caustics on,
+    // the light it would find at the end of that is light tracing's to
+    // count (if the camera sees the surface directly) or photon mapping's.
     var caustic = false;
+    var diffuse_seen = false;
 
     for (var depth = 0u; depth <= params.max_bounces; depth++) {
 
@@ -1103,6 +1113,7 @@ fn radiance(px: vec2f) -> vec3f {
             d = wi;
 
             caustic = false;
+            diffuse_seen = true;
 
             if (!roulette(&throughput, depth)) {
                 break;
@@ -1159,11 +1170,9 @@ fn radiance(px: vec2f) -> vec3f {
             break;
         }
 
-        if (depth == 0u) {
-            caustic = params.caustics != 0u && !is_delta(m);
-        }
-        else if (!is_delta(m)) {
-            caustic = false;
+        if (!is_delta(m)) {
+            caustic = params.caustics != 0u && !diffuse_seen;
+            diffuse_seen = true;
         }
 
         if (depth == params.max_bounces) {
@@ -1340,10 +1349,139 @@ fn splat(s: Surface, m: Material, base: vec3f, d: vec3f, beta: vec3f) {
     atomicAdd(&splats[index + 2u], fixed.z);
 }
 
-// The photons each frame: one per sample, up to as many as one dispatch of
-// 64-wide workgroups can take (Renderer.#photons() agrees).
+// The photons each frame: one per sample, up to as many as photon mapping
+// can store (Renderer's dispatch agrees).
 fn photon_count() -> u32 {
-    return min(params.width * params.height * params.samples_per_frame, 65535u * 64u);
+    return min(params.width * params.height * params.samples_per_frame, PHOTON_CAPACITY);
+}
+
+// ---- Photon mapping ----
+//
+// Light tracing can't connect a surface to the camera through glass, so
+// caustics seen through glass or water (a pool's floor through its water)
+// are photon mapping's: light tracing's photons are also stored where
+// they land, and photon_gather follows the camera through mirrors and
+// glass to the first other surface and adds up the photons near it. The
+// radius shrinks each frame, so the average converges, as progressive
+// photon mapping does.
+
+const PHOTON_TABLE = 1048576u;
+const PHOTON_CAPACITY = 524288u;
+
+fn photon_cell_hash(cell: vec3i) -> u32 {
+    let c = bitcast<vec3u>(cell);
+    return ((c.x * 73856093u) ^ (c.y * 19349663u) ^ (c.z * 83492791u)) & (PHOTON_TABLE - 1u);
+}
+
+// Stores a photon of power beta, which arrived along d at point p.
+fn deposit(p: vec3f, d: vec3f, beta: vec3f) {
+    let i = atomicAdd(&photon_heads[PHOTON_TABLE], 1u);
+    if (i >= PHOTON_CAPACITY) {
+        return;
+    }
+    let cell = vec3i(floor(p / params.photon_cell));
+    let next = atomicExchange(&photon_heads[photon_cell_hash(cell)], i + 1u);
+    photons[i * 3u] = vec4f(p, bitcast<f32>(next));
+    photons[i * 3u + 1u] = vec4f(beta, 0.0);
+    photons[i * 3u + 2u] = vec4f(-d, 0.0);
+}
+
+// The caustic light leaving surface s towards wo, from the photons within
+// the radius: their power times the BSDF, over the disc's area. Photons
+// must lie on the surface (not a thin wall's far side) and have come from
+// its side.
+fn gather(s: Surface, m: Material, base: vec3f, wo: vec3f) -> vec3f {
+
+    let r = params.photon_radius;
+    let r2 = r * r;
+    let cell_size = params.photon_cell;
+    let here = s.p / cell_size;
+    let cell = vec3i(floor(here));
+    // The cells are twice the starting radius, so the photons within it
+    // are in this one or the neighbours on the nearer side each way.
+    let side = vec3i(select(vec3i(-1), vec3i(1), fract(here) >= vec3f(0.5)));
+
+    var sum = vec3f(0.0);
+    var visited = 0u;
+    for (var k = 0u; k < 8u; k++) {
+        let c = cell + vec3i(i32(k & 1u), i32((k >> 1u) & 1u), i32((k >> 2u) & 1u)) * side;
+        var index = atomicLoad(&photon_heads[photon_cell_hash(c)]);
+        loop {
+            if (index == 0u || visited >= 4096u) {
+                break;
+            }
+            visited++;
+            let at = photons[(index - 1u) * 3u];
+            let offset = at.xyz - s.p;
+            if (dot(offset, offset) < r2 && abs(dot(offset, s.ng)) < 0.25 * r) {
+                let wi = photons[(index - 1u) * 3u + 2u].xyz;
+                let cos_in = dot(s.n, wi);
+                if (cos_in > 0.0 && dot(s.ng, wi) > 0.0) {
+                    let e = eval_bsdf(m, base, s.n, wo, wi);
+                    sum += photons[(index - 1u) * 3u + 1u].xyz * (e.f / cos_in);
+                }
+            }
+            index = bitcast<u32>(at.w);
+        }
+    }
+
+    return sum / (PI * r2);
+}
+
+// One path per pixel from the camera through mirrors and glass to the
+// first other surface, adding the caustic light the photons there make
+// to the average, once for each of the frame's samples. A surface the
+// camera sees directly is light tracing's. Glass that splits colours is
+// taken at its middle index here: the photons carry the colours.
+@compute @workgroup_size(8, 8)
+fn photon_gather(@builtin(global_invocation_id) id: vec3u) {
+
+    if (id.x >= params.width || id.y >= params.height) {
+        return;
+    }
+
+    let index = id.y * params.width + id.x;
+    rng_state = pcg(index ^ pcg(params.sample_offset * 2654435769u + 4099u));
+
+    let ray = camera_ray(vec2f(id.xy) + vec2f(rand(), rand()), true);
+    var o = ray[0];
+    var d = ray[1];
+    var throughput = vec3f(1.0);
+
+    for (var depth = 0u; depth < params.max_bounces; depth++) {
+
+        let hit = trace(o, d, INF, false);
+        if (hit.prim == NONE) {
+            return;
+        }
+
+        let s = surface(o, d, hit);
+        let m = materials[s.material];
+        if (m.kind == LIGHT) {
+            return;
+        }
+
+        let base = albedo(m, s.p, s.uv);
+
+        if (!is_delta(m)) {
+            if (depth > 0u) {
+                let light = throughput * gather(s, m, base, -d);
+                if (finite(light)) {
+                    let l = luminance(light);
+                    accum[index] += vec4f(light, l * l) * f32(params.samples_per_frame);
+                }
+            }
+            return;
+        }
+
+        let bs = sample_bsdf(m, base, s, -d);
+        if (!bs.ok) {
+            return;
+        }
+        throughput *= bs.weight;
+        o = offset(s, bs.wi);
+        d = bs.wi;
+    }
 }
 
 // One photon, of photon_count(): from a light chosen by power, through
@@ -1466,6 +1604,7 @@ fn light_trace(@builtin(global_invocation_id) id: vec3u) {
             // mirrors or glass, it's a caustic.
             if (bounces > 0u) {
                 splat(s, m, base, d, beta * carried);
+                deposit(s.p, d, beta * carried);
             }
             return;
         }
