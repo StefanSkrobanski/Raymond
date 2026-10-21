@@ -178,6 +178,42 @@ test("the GPU's textures match the CPU's, on every kind of primitive", async () 
     assert.ok(wrong <= compared * 0.01, `${wrong} of ${compared} pixels disagree`);
 });
 
+test("the GPU's normal maps match the CPU's, on every kind of primitive", async () => {
+
+    const size = 64;
+    const { pixels, hits } = await trace("bumpy", { view: "normal", spp: 1, size });
+
+    let compared = 0, wrong = 0, tilted = 0;
+    for (const i of interior(hits, size)) {
+        compared++;
+        if (dot(rgb(pixels, i), hits[i].normal) < 0.995)
+            wrong++;
+        if (Math.abs(hits[i].normal[1]) < 0.98 && hits[i].object == 0)
+            tilted++;
+    }
+
+    assert.ok(compared > size * size * 0.6, `most pixels see something (${compared})`);
+    assert.ok(tilted > 100, `the bumps tilt the floor's normals (${tilted})`);
+    assert.ok(wrong <= compared * 0.01, `${wrong} of ${compared} pixels disagree`);
+});
+
+test("the GPU's patterned lamps match the CPU's", async () => {
+
+    const size = 48;
+    const { pixels, hits } = await trace("patternedLamps", { view: "albedo", spp: 1, size });
+
+    let compared = 0, wrong = 0;
+    for (const i of interior(hits, size)) {
+        compared++;
+        const gpu = rgb(pixels, i), cpu = hits[i].albedo;
+        if ([0, 1, 2].some((c) => Math.abs(gpu[c] - cpu[c]) > 0.02))
+            wrong++;
+    }
+
+    assert.ok(compared > size * size * 0.4, `most pixels see a lamp (${compared})`);
+    assert.ok(wrong <= compared * 0.01, `${wrong} of ${compared} pixels disagree`);
+});
+
 // ---- Light, against exact answers ----
 
 test("a white furnace: a diffuse ball reflects exactly its albedo", async () => {
@@ -202,6 +238,91 @@ test("a white furnace: clear glass neither gains nor loses light", async () => {
     const ball = interior(hits, size, 0).map((i) => mean(rgb(pixels, i)));
 
     assert.ok(Math.abs(mean(ball) - 1.0) < 0.015, `ball ${mean(ball)}`);
+});
+
+test("a white furnace: glass that splits colours still looks white", async () => {
+
+    const size = 32;
+    const { pixels, hits } = await trace("furnaceDispersive", { spp: 256, size, bounces: 32 });
+
+    const ball = interior(hits, size, 0);
+    for (const c of [0, 1, 2]) {
+        const channel = mean(ball.map((i) => pixels[i * 4 + c]));
+        assert.ok(Math.abs(channel - 1.0) < 0.03, `channel ${c}: ${channel}`);
+    }
+});
+
+test("splitting colours fringes what's seen through glass, and plain glass doesn't", async () => {
+
+    const size = 48;
+    // How far from grey the most colourful pixel is.
+    const colourfulness = ({ pixels }) => Math.max(...Array.from({ length: size * size }, (_, i) => {
+        const [r, g, b] = rgb(pixels, i);
+        const total = r + g + b;
+        return total > 0.05 ? (Math.max(r, g, b) - Math.min(r, g, b)) / total : 0;
+    }));
+
+    const plain = colourfulness(await trace("stripThroughGlass", { arg: "0", spp: 64, size, bounces: 8 }));
+    const split = colourfulness(await trace("stripThroughGlass", { arg: "15", spp: 64, size, bounces: 8 }));
+
+    assert.ok(plain < 1e-3, `plain glass ${plain}`);
+    assert.ok(split > 0.3, `splitting glass ${split}`);
+});
+
+test("a white furnace: fog that only scatters neither makes nor loses light", async () => {
+
+    const size = 32;
+    const { pixels } = await trace("furnaceFog", { spp: 128, size, bounces: 64 });
+
+    const all = mean(Array.from({ length: size * size }, (_, i) => mean(rgb(pixels, i))));
+    assert.ok(Math.abs(all - 1.0) < 0.01, `mean ${all}`);
+});
+
+test("light through black smoke falls off as exp(-density × distance)", async () => {
+
+    const size = 48;
+    const { pixels, rays } = await trace("blackSmoke", { spp: 256, size });
+
+    // Where each pixel's centre ray crosses the sphere, and the box (in its
+    // own space, where it spans -1..1).
+    const sphereChord = ({ origin, direction }) => {
+        const oc = sub(origin, [-0.7, 0, 0]);
+        const a = dot(direction, direction), b = dot(oc, direction), c = dot(oc, oc) - 0.64;
+        const disc = b * b - a * c;
+        return disc > 0 ? 2 * Math.sqrt(disc) / a * length(direction) : 0;
+    };
+    const box = { center: [0.6, 0, 0], size: [0.6, 0.5, 0.4], rx: 0.4, ry: 0.6 };
+    const toBox = (v) => {
+        // Undo the box's turns: rotateY(0.6) then rotateX(0.4), applied as Y(X(v)).
+        const cy = Math.cos(-box.ry), sy = Math.sin(-box.ry), cx = Math.cos(-box.rx), sx = Math.sin(-box.rx);
+        const y = [cy * v[0] + sy * v[2], v[1], -sy * v[0] + cy * v[2]];
+        return [y[0], cx * y[1] - sx * y[2], sx * y[1] + cx * y[2]];
+    };
+    const boxChord = ({ origin, direction }) => {
+        const o = toBox(sub(origin, box.center)).map((c, k) => c / box.size[k]);
+        const d = toBox(direction).map((c, k) => c / box.size[k]);
+        let near = -Infinity, far = Infinity;
+        for (let k = 0; k < 3; ++k) {
+            const t0 = (-1 - o[k]) / d[k], t1 = (1 - o[k]) / d[k];
+            near = Math.max(near, Math.min(t0, t1));
+            far = Math.min(far, Math.max(t0, t1));
+        }
+        return far > near && far > 0 ? (far - Math.max(near, 0)) * length(direction) : 0;
+    };
+    const expected = rays.map((ray) => Math.exp(-1.5 * (sphereChord(ray) + boxChord(ray))));
+
+    // Pixels away from the edges, where antialiasing blends values.
+    const smooth = [];
+    for (let y = 1; y < size - 1; ++y)
+        for (let x = 1; x < size - 1; ++x) {
+            const i = y * size + x;
+            if (expected[i] < 0.98 && [i - 1, i + 1, i - size, i + size].every((j) => Math.abs(expected[j] - expected[i]) < 0.05))
+                smooth.push(i);
+        }
+
+    assert.ok(smooth.length > 100, `${smooth.length} pixels through smoke`);
+    const ratio = mean(smooth.map((i) => pixels[i * 4] / expected[i]));
+    assert.ok(Math.abs(ratio - 1.0) < 0.02, `rendered / exact = ${ratio}`);
 });
 
 // The brightness of the floor (albedo 0.5) at each pixel, against the
@@ -289,6 +410,36 @@ for (const material of ["diffuse", "plastic", "metal"]) {
         assert.ok(Math.abs(a / b - 1.0) < 0.03, `direct ${a}, bounced ${b}`);
     });
 }
+
+test("sampling a patterned lamp directly agrees with finding it by bouncing, patch by patch", async () => {
+
+    const size = 32;
+    const direct = await trace("patternedLamp", { arg: "light", spp: 256, size, bounces: 1 });
+    const bounced = await trace("patternedLamp", { arg: "glow", spp: 1024, size, bounces: 1 });
+
+    // The floor in quarters: a lamp lit the wrong way round would light
+    // them differently.
+    const floor = interior(direct.hits, size, 0).filter((i) => bounced.hits[i]?.object == 0);
+    for (const quarter of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+        const patch = floor.filter((i) => Math.floor((i % size) / (size / 2)) == quarter[0] && Math.floor(i / size / (size / 2)) == quarter[1]);
+        for (const c of [0, 1, 2]) {
+            const a = mean(patch.map((i) => direct.pixels[i * 4 + c]));
+            const b = mean(patch.map((i) => bounced.pixels[i * 4 + c]));
+            assert.ok(Math.abs(a / b - 1.0) < 0.04, `quarter ${quarter}, channel ${c}: direct ${a}, bounced ${b}`);
+        }
+    }
+});
+
+test("sampling a light through fog agrees with finding it by scattering", async () => {
+
+    const size = 32;
+    const direct = await trace("lampInFog", { arg: "light", spp: 256, size, bounces: 1 });
+    const bounced = await trace("lampInFog", { arg: "mesh", spp: 1024, size, bounces: 1 });
+
+    const a = mean(Array.from({ length: size * size }, (_, i) => mean(rgb(direct.pixels, i))));
+    const b = mean(Array.from({ length: size * size }, (_, i) => mean(rgb(bounced.pixels, i))));
+    assert.ok(Math.abs(a / b - 1.0) < 0.03, `direct ${a}, bounced ${b}`);
+});
 
 // ---- The denoiser ----
 

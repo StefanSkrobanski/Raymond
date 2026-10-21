@@ -28,24 +28,34 @@ import { Vec3 } from "./Vec3.mjs";
  * matrix, row by row; or a triangle's vertices.
  *
  * A triangle's attribute block is 4 vec4s: each vertex's normal with its
- * texture u in w, then the three vertices' texture v, and 1 in w if the
- * normals are there (smooth) or 0 if only the texture coordinates are.
+ * texture u in w, then the three vertices' texture v, and in w, flags: 1
+ * if the normals are there (smooth), plus 2 if the texture coordinates are.
  *
- * Materials are 64 bytes: vec3 color, u32 type, vec3 emission, f32
+ * Volumes (spheres and boxes of a volume material) come after the others,
+ * outside the BVH, since rays pass through them: the shader finds where a
+ * ray crosses each one, listed in volumes.
+ *
+ * Materials are 96 bytes: vec3 color, u32 type, vec3 emission, f32
  * roughness, vec3 checker, f32 checkerSize (0 for none), f32 ior, u32
- * texture (an index in textures, or NONE), then the texture's scale in u
- * and v.
+ * texture (an index in textures, or NONE), the texture's scale in u and
+ * v; u32 normalMap (an index in normalMaps, or NONE), f32 normalScale, u32
+ * emissionTexture (an index in textures, or NONE), f32 dispersion (see
+ * Material.dispersion); f32 density, f32 anisotropy, and 8 bytes unused.
  * @typedef {object} PackedScene
- * @property {ArrayBuffer} primitives
- * @property {number} primitiveCount
+ * @property {ArrayBuffer} primitives the BVH's primitives, then the volumes
+ * @property {number} primitiveCount the number in the BVH
  * @property {ArrayBuffer} nodes the BVH, as BVH documents it
  * @property {number} nodeCount
  * @property {ArrayBuffer} materials
  * @property {number} materialCount
  * @property {Float32Array} attributes triangles' attribute blocks, 16 floats each
- * @property {Texture[]} textures in the order materials refer to them
+ * @property {Texture[]} textures colour and emission textures, in the order
+ *   materials refer to them
+ * @property {Texture[]} normalMaps likewise
  * @property {Uint32Array} lights the indices of primitives to sample as lights
- * @property {SceneObject[]} objects the object each primitive came from
+ * @property {number[]} volumes the indices of the volumes' primitives
+ * @property {SceneObject[]} objects the object each of the BVH's
+ *   primitives came from
  * @property {Material[]} materialList in the same order as materials
  */
 
@@ -54,7 +64,8 @@ import { Vec3 } from "./Vec3.mjs";
  * @typedef {object} Hit
  * @property {number} distance along the ray, in units of its direction's length
  * @property {Vec3} point
- * @property {Vec3} normal unit length, facing back along the ray
+ * @property {Vec3} normal unit length, facing back along the ray: the
+ *   shading normal, smoothed and bumped as the shader sees it
  * @property {boolean} frontFace whether the ray hit the outside
  * @property {Vec2} uv where it hit on the material's texture, before the
  *   texture's scale
@@ -73,7 +84,10 @@ export const PRIMITIVE_KINDS = Object.freeze({
 export const NONE = 0xffffffff;
 
 const PRIMITIVE_FLOATS = 16;
-const MATERIAL_FLOATS = 16;
+// Flags in a triangle's attribute block.
+const SMOOTH = 1;
+const TEXTURED = 2;
+const MATERIAL_FLOATS = 24;
 
 /**
  * The objects to render and the sky around them. Packing for the GPU
@@ -242,8 +256,18 @@ export class Scene {
             return null;
 
         const point = origin.add(direction.scale(best_t));
-        const { geometric, shading } = Scene.#normals(packed, floats, uints, best, point, best_u, best_v);
+        const material = packed.materialList[uints[best * PRIMITIVE_FLOATS + 1]];
+        const { geometric, shading: smooth } = Scene.#normals(packed, floats, uints, best, point, best_u, best_v);
         const uv = Scene.#uv(packed, floats, uints, best, point, best_u, best_v);
+
+        let shading = smooth;
+        if (material.normalMap) {
+            const { tangent, up } = Scene.#tangents(packed, floats, uints, best, point, best_u, best_v);
+            const scale = material.textureScale;
+            const t = material.normalMap.sample(uv.x * scale.x, uv.y * scale.y, false);
+            shading = bump(smooth, geometric, tangent, up, t, material.normalScale);
+        }
+
         const front_face = geometric.dot(direction) < 0.0;
         const facing = front_face ? shading : shading.negate();
 
@@ -254,7 +278,7 @@ export class Scene {
             frontFace: front_face,
             uv,
             object: packed.objects[best],
-            material: packed.materialList[uints[best * PRIMITIVE_FLOATS + 1]],
+            material,
         };
     }
 
@@ -289,6 +313,27 @@ export class Scene {
         const texture_index = new Map();
         /** @type {Texture[]} */
         const texture_list = [];
+        /** @type {Map<Texture, number>} */
+        const normal_map_index = new Map();
+        /** @type {Texture[]} */
+        const normal_map_list = [];
+
+        /**
+         * @param {Texture | null} texture
+         * @param {Map<Texture, number>} index
+         * @param {Texture[]} list
+         */
+        const textureOf = (texture, index, list) => {
+            if (!texture)
+                return NONE;
+            let i = index.get(texture);
+            if (i === undefined) {
+                i = list.length;
+                list.push(texture);
+                index.set(texture, i);
+            }
+            return i;
+        };
 
         // Each primitive, in object order: its packed record (with the
         // attributes index still to fix), its attribute block, its bounds.
@@ -346,6 +391,9 @@ export class Scene {
 
         for (const object of objects) {
 
+            if (object.material.type == "volume" && !(object instanceof Sphere || object instanceof Box))
+                throw new TypeError("A volume must be a Sphere or a Box.");
+
             if (object instanceof Sphere) {
                 const c = object.center, r = object.radius;
                 const { x, north } = object.axes();
@@ -379,7 +427,7 @@ export class Scene {
                             const n = normals ? normals[k] : new Vec3();
                             block.push(n.x, n.y, n.z, uvs ? uvs[k].x : 0.0);
                         }
-                        block.push(...tri.map((k) => uvs ? uvs[k].y : 0.0), normals ? 1.0 : 0.0);
+                        block.push(...tri.map((k) => uvs ? uvs[k].y : 0.0), (normals ? SMOOTH : 0) + (uvs ? TEXTURED : 0));
                     }
 
                     addPrimitive(object, PRIMITIVE_KINDS.triangle, object.material,
@@ -389,18 +437,24 @@ export class Scene {
             }
         }
 
-        const count = records.length;
+        // Volumes stay out of the BVH: rays go through them.
+        const is_volume = records.map((r) => material_list[new Uint32Array(r.buffer)[1]].type == "volume");
+        const surface_ids = records.map((_, i) => i).filter((i) => !is_volume[i]);
+        const volume_ids = records.map((_, i) => i).filter((i) => is_volume[i]);
+
+        const count = surface_ids.length;
         const bounds = new Float64Array(bound_list);
         const mins = new Float64Array(count * 3);
         const maxs = new Float64Array(count * 3);
-        for (let i = 0; i < count; ++i) {
-            mins.set(bounds.subarray(i * 6, i * 6 + 3), i * 3);
-            maxs.set(bounds.subarray(i * 6 + 3, i * 6 + 6), i * 3);
-        }
+        surface_ids.forEach((id, i) => {
+            mins.set(bounds.subarray(id * 6, id * 6 + 3), i * 3);
+            maxs.set(bounds.subarray(id * 6 + 3, id * 6 + 6), i * 3);
+        });
 
         const bvh = BVH.build(mins, maxs);
 
-        const primitives = new ArrayBuffer(Math.max(count, 1) * PRIMITIVE_FLOATS * 4);
+        const slots = Math.max(count, 1);
+        const primitives = new ArrayBuffer((slots + volume_ids.length) * PRIMITIVE_FLOATS * 4);
         const prim_floats = new Float32Array(primitives);
         const prim_uints = new Uint32Array(primitives);
 
@@ -418,9 +472,15 @@ export class Scene {
         /** @type {SceneObject[]} */
         const packed_owners = [];
 
+        /** @type {number[]} */
+        const volume_list = volume_ids.map((id, k) => {
+            prim_floats.set(records[id], (slots + k) * PRIMITIVE_FLOATS);
+            return slots + k;
+        });
+
         for (let i = 0; i < count; ++i) {
 
-            const source = bvh.order[i];
+            const source = surface_ids[bvh.order[i]];
             prim_floats.set(records[source], i * PRIMITIVE_FLOATS);
             packed_owners.push(owners[source]);
 
@@ -450,18 +510,14 @@ export class Scene {
             if (m.checker)
                 mat_floats.set([m.checker.x, m.checker.y, m.checker.z, m.checkerSize], o + 8);
             mat_floats[o + 12] = m.ior;
-
-            mat_uints[o + 13] = NONE;
-            if (m.texture) {
-                let t = texture_index.get(m.texture);
-                if (t === undefined) {
-                    t = texture_list.length;
-                    texture_list.push(m.texture);
-                    texture_index.set(m.texture, t);
-                }
-                mat_uints[o + 13] = t;
-                mat_floats.set([m.textureScale.x, m.textureScale.y], o + 14);
-            }
+            mat_uints[o + 13] = textureOf(m.texture, texture_index, texture_list);
+            mat_floats.set([m.textureScale.x, m.textureScale.y], o + 14);
+            mat_uints[o + 16] = textureOf(m.normalMap, normal_map_index, normal_map_list);
+            mat_floats[o + 17] = m.normalScale;
+            mat_uints[o + 18] = textureOf(m.emissionTexture, texture_index, texture_list);
+            mat_floats[o + 19] = m.dispersion;
+            mat_floats[o + 20] = m.density;
+            mat_floats[o + 21] = m.anisotropy;
         });
 
         return {
@@ -474,7 +530,9 @@ export class Scene {
             // At least one element each: WebGPU can't bind an empty buffer.
             attributes: new Float32Array(attribute_list.length > 0 ? attribute_list : [0, 0, 0, 0]),
             textures: texture_list,
+            normalMaps: normal_map_list,
             lights: new Uint32Array(light_list.length > 0 ? light_list : [NONE]),
+            volumes: volume_list,
             objects: packed_owners,
             materialList: material_list,
         };
@@ -663,7 +721,7 @@ export class Scene {
 
         const ai = u32[b + 3];
         const af = packed.attributes;
-        if (ai == NONE || af[(ai + 3) * 4 + 3] == 0.0)
+        if (ai == NONE || !(af[(ai + 3) * 4 + 3] & SMOOTH))
             return { geometric, shading: geometric };
 
         /** @param {number} k */
@@ -676,6 +734,71 @@ export class Scene {
             shading = shading.negate();
 
         return { geometric, shading };
+    }
+
+    // The directions on the surface in which the texture runs right
+    // (increasing u) and up (decreasing v), for normal maps, as the shader
+    // works them out. Neither need be unit length or quite perpendicular to
+    // the normal.
+    /**
+     * @param {PackedScene} packed
+     * @param {Float32Array} f
+     * @param {Uint32Array} u32
+     * @param {number} p
+     * @param {Vec3} point
+     * @param {number} bu
+     * @param {number} bv
+     */
+    static #tangents(packed, f, u32, p, point, bu, bv) {
+
+        const b = p * PRIMITIVE_FLOATS;
+        const kind = u32[b];
+
+        /** @param {number} i */
+        const vec = (i) => new Vec3(f[b + i], f[b + i + 1], f[b + i + 2]);
+
+        if (kind == PRIMITIVE_KINDS.sphere) {
+            // Eastwards, and northwards.
+            const d = point.subtract(vec(4)).normalized();
+            let tangent = vec(12).cross(d);
+            if (tangent.length() < 1e-6)
+                tangent = vec(8);
+            return { tangent, up: d.cross(tangent) };
+        }
+
+        if (kind == PRIMITIVE_KINDS.quad)
+            return { tangent: vec(8), up: vec(12) };
+
+        if (kind == PRIMITIVE_KINDS.box) {
+            // The face's axes, as boxUv lays the texture on them.
+            const lp = [0, 1, 2].map((r) => f[b + 4 + r * 4] * point.x + f[b + 5 + r * 4] * point.y + f[b + 6 + r * 4] * point.z + f[b + 7 + r * 4]);
+            const [ax, ay, az] = lp.map(Math.abs);
+            const r0 = vec(4), r1 = vec(8), r2 = vec(12);
+            if (ax >= ay && ax >= az)
+                return { tangent: r2.scale(-Math.sign(lp[0])), up: r1 };
+            if (ay >= az)
+                return { tangent: r0, up: r2.scale(-Math.sign(lp[1])) };
+            return { tangent: r0.scale(Math.sign(lp[2])), up: r1 };
+        }
+
+        // A triangle: solve for how the position changes with u and v,
+        // from its edges and their texture coordinates.
+        const v0 = vec(4);
+        const e1 = vec(8).subtract(v0), e2 = vec(12).subtract(v0);
+        const ai = u32[b + 3];
+        const af = packed.attributes;
+        let du1 = [1, 0], du2 = [0, 1];
+        if (ai != NONE && af[(ai + 3) * 4 + 3] & TEXTURED) {
+            const uv = (/** @type {number} */ k) => [af[(ai + k) * 4 + 3], af[(ai + 3) * 4 + k]];
+            const [a, c, d] = [uv(0), uv(1), uv(2)];
+            const t1 = [c[0] - a[0], c[1] - a[1]], t2 = [d[0] - a[0], d[1] - a[1]];
+            if (Math.abs(t1[0] * t2[1] - t2[0] * t1[1]) > 1e-12)
+                [du1, du2] = [t1, t2];
+        }
+        const det = du1[0] * du2[1] - du2[0] * du1[1];
+        const dpdu = e1.scale(du2[1]).subtract(e2.scale(du1[1])).scale(1.0 / det);
+        const dpdv = e2.scale(du1[0]).subtract(e1.scale(du2[0])).scale(1.0 / det);
+        return { tangent: dpdu, up: dpdv.negate() };
     }
 
     // Where a hit falls on the texture, as the shader works it out: a
@@ -714,15 +837,45 @@ export class Scene {
         }
 
         const ai = u32[b + 3];
-        if (ai == NONE)
+        const af = packed.attributes;
+        if (ai == NONE || !(af[(ai + 3) * 4 + 3] & TEXTURED))
             return new Vec2(bu, bv);
 
-        const af = packed.attributes;
         const w = 1.0 - bu - bv;
         return new Vec2(
             af[ai * 4 + 3] * w + af[(ai + 1) * 4 + 3] * bu + af[(ai + 2) * 4 + 3] * bv,
             af[(ai + 3) * 4] * w + af[(ai + 3) * 4 + 1] * bu + af[(ai + 3) * 4 + 2] * bv);
     }
+}
+
+/**
+ * The shading normal n tilted by a normal map's texel t (its channels
+ * from 0 to 1), in the frame of the texture's right (tangent) and up, as
+ * the shader does it. The tilt is kept on the outside of the geometric
+ * normal ng.
+ * @param {Vec3} n
+ * @param {Vec3} ng
+ * @param {Vec3} tangent
+ * @param {Vec3} up
+ * @param {Vec3} t
+ * @param {number} strength
+ */
+function bump(n, ng, tangent, up, t, strength) {
+
+    let right = tangent.subtract(n.scale(n.dot(tangent)));
+    if (right.length() < 1e-9)
+        return n;
+    right = right.normalized();
+    let above = n.cross(right);
+    if (above.dot(up) < 0.0)
+        above = above.negate();
+
+    const tilted = right.scale((t.x * 2.0 - 1.0) * strength)
+        .add(above.scale((t.y * 2.0 - 1.0) * strength))
+        .add(n.scale(t.z * 2.0 - 1.0))
+        .normalized();
+
+    return tilted.dot(ng) > 0.0 ? tilted : n;
 }
 
 /**

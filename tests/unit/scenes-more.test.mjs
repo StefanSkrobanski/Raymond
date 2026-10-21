@@ -3,13 +3,17 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Material, Mesh, Sphere, Vec3 } from "../../src/index.mjs";
+import { Box, Material, Mesh, Sphere, Vec3 } from "../../src/index.mjs";
 import { rack, BALL_RADIUS } from "../../scenes/billiards.mjs";
+import { sunbeams } from "../../scenes/blinds.mjs";
 import { pinSpots } from "../../scenes/bowling.mjs";
 import { PIECES } from "../../scenes/chess.mjs";
+import { cityAtNight, tinyCity } from "../../scenes/city.mjs";
 import { COUNT, dominoLayout } from "../../scenes/dominoes.mjs";
+import { mistyForest } from "../../scenes/forest.mjs";
 import { lensProfile } from "../../scenes/magnifier.mjs";
 import { pendulums } from "../../scenes/pendulum.mjs";
+import { prismMesh } from "../../scenes/prism.mjs";
 import { rubiksCube } from "../../scenes/rubik.mjs";
 import { sierpinskiScene } from "../../scenes/sierpinski.mjs";
 import { BODY } from "../../scenes/snowman.mjs";
@@ -156,4 +160,68 @@ test("the snowman's balls are stacked, each resting on the one below", () => {
         // Pressed a little into each other, as packed snow would be.
         assert.ok(gap < 0 && gap > -0.25 * above.r, `ball ${k} rests on ball ${k - 1}`);
     }
+});
+
+test("the prism is a triangular glass solid, wound outwards", () => {
+
+    // An equilateral triangle in a circle of radius r has area 3√3/4 r².
+    const r = 0.7, h = 2;
+    const volume = signedVolume(prismMesh(glass, r, h));
+    assert.ok(Math.abs(volume - 3 * Math.sqrt(3) / 4 * r * r * h) < 1e-9, `volume ${volume}`);
+});
+
+test("at night, the offices' windows and the streets glow, and by day nothing does", () => {
+
+    const glowing = (scene) => scene.objects.filter((o) => o.material.glows && o.material.type != "light");
+
+    assert.equal(glowing(tinyCity().scene).length, 0);
+
+    const night = glowing(cityAtNight().scene);
+    const offices = night.filter((o) => o instanceof Box);
+    assert.ok(offices.length > 20, `${offices.length} offices lit`);
+    assert.ok(offices.every((o) => o.material.emissionTexture == offices[0].material.emissionTexture));
+    assert.equal(night.length - offices.length, 1, "and the streets");
+});
+
+// The corners of the box a volume fills.
+const extent = (box) => {
+    const corners = box.corners();
+    return {
+        min: new Vec3(Math.min(...corners.map((c) => c.x)), Math.min(...corners.map((c) => c.y)), Math.min(...corners.map((c) => c.z))),
+        max: new Vec3(Math.max(...corners.map((c) => c.x)), Math.max(...corners.map((c) => c.y)), Math.max(...corners.map((c) => c.z))),
+    };
+};
+
+test("the haze fills the room with the sunbeams, and stays inside it", () => {
+
+    const { scene, camera } = sunbeams();
+    const [haze, ...others] = scene.objects.filter((o) => o.material.type == "volume");
+    assert.equal(others.length, 0);
+
+    // The room runs from -3 to 3 across and 0 to 3 up; outside, the sun
+    // would light the haze without the blind's shadows.
+    const { min, max } = extent(haze);
+    assert.ok(min.x >= -3 && min.y >= 0 && min.z >= -3 && max.x <= 3 && max.y <= 3 && max.z <= 3);
+    const p = camera.position;
+    assert.ok(p.x > min.x && p.x < max.x && p.y > min.y && p.y < max.y && p.z > min.z && p.z < max.z, "the camera is in it");
+});
+
+test("the misty forest's mist lies over the whole forest, thickest low down", () => {
+
+    const { scene, camera } = mistyForest();
+    const mist = scene.objects.filter((o) => o.material.type == "volume");
+    assert.equal(mist.length, 2);
+
+    const [low, high] = mist.map(extent);
+    assert.ok(low.max.y == high.min.y, "the layers meet");
+    assert.ok(mist[0].material.density > mist[1].material.density);
+
+    // Every tree stands within the mist's square.
+    const trees = scene.objects.filter((o) => o instanceof Mesh && o.triangleCount < 200);
+    assert.ok(trees.length > 100);
+    for (const tree of trees) {
+        const p = tree.positions[0];
+        assert.ok(Math.abs(p.x) < low.max.x && Math.abs(p.z) < low.max.z);
+    }
+    assert.ok(camera.position.y < high.max.y, "the camera is in it");
 });

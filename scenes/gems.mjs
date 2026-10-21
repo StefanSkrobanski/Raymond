@@ -65,7 +65,7 @@ export function gemMesh(material, facets = 16) {
 /**
  * Cut gems on grey satin in a photographer's studio: a soft grey
  * backdrop for the stones to show against, and small bright lamps, which
- * the facets split into sparkles.
+ * the facets split into sparkles, and the diamond into colours.
  */
 export function gems() {
 
@@ -76,7 +76,9 @@ export function gems() {
     scene.add(floor(30, Material.plastic(hexColor("#6d6873"), 0.55)));
 
     const stones = [
-        { material: Material.glass(2.42), at: new Vec3(0, 0.43, 0), size: 1.2, tilt: 0.0 },                      // diamond
+        // Diamond's fire is its dispersion; this one's a little fierier
+        // than a real one (Abbe number 55).
+        { material: Material.glass(2.42, new Vec3(1, 1, 1), 30), at: new Vec3(0, 0.43, 0), size: 1.2, tilt: 0.0 },  // diamond
         { material: Material.glass(1.77, hexColor("#ff5577")), at: new Vec3(-1.25, 0.3, 0.5), size: 0.8, tilt: 0.5 },  // ruby
         { material: Material.glass(1.77, hexColor("#4f78ff")), at: new Vec3(1.2, 0.3, 0.6), size: 0.8, tilt: -0.4 },  // sapphire
         { material: Material.glass(1.57, hexColor("#33dd88")), at: new Vec3(0.3, 0.22, 1.35), size: 0.55, tilt: 0.9 }, // emerald

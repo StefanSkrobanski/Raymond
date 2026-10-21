@@ -7,6 +7,12 @@ import { Vec3 } from "./Vec3.mjs";
  *
  * Make one from a function with Texture.procedural(), or from an image
  * with Texture.load() or Texture.fromImage() (in a browser).
+ *
+ * A texture used as a normal map (Material.withNormalMap) is read as plain
+ * numbers rather than sRGB colour: each pixel's red, green and blue, from
+ * 0 to 255, map to -1..1 along the texture's right, its up and out of the
+ * surface (the OpenGL convention, as Blender makes them).
+ * Texture.normalMap() makes one from a height function.
  */
 export class Texture {
 
@@ -72,6 +78,48 @@ export class Texture {
     }
 
     /**
+     * A normal map for bumps of the given height: height(u, v), for u and
+     * v from 0 to 1 across and down, returns the height there as a
+     * fraction of the texture's width (so 0.01 is a bump a hundredth as
+     * high as the texture is wide). Pixels are square: a texture twice as
+     * wide as it's high should be laid on a surface twice as wide as high
+     * to keep its slopes.
+     * @param {number} width
+     * @param {number} height
+     * @param {(u: number, v: number) => number} heightAt
+     */
+    static normalMap(width, height, heightAt) {
+
+        const h = new Float64Array(width * height);
+        for (let y = 0; y < height; ++y)
+            for (let x = 0; x < width; ++x)
+                h[y * width + x] = heightAt((x + 0.5) / width, (y + 0.5) / height);
+
+        /** @type {(x: number, y: number) => number} */
+        const at = (x, y) => h[mod(y, height) * width + mod(x, width)];
+
+        const data = new Uint8Array(width * height * 4);
+        for (let y = 0; y < height; ++y) {
+            for (let x = 0; x < width; ++x) {
+                // Slopes per texture width, across and down; a pixel is
+                // 1 / width of the texture's width either way.
+                const right = (at(x + 1, y) - at(x - 1, y)) * width / 2.0;
+                const down = (at(x, y + 1) - at(x, y - 1)) * width / 2.0;
+                // Rising to the right tilts the normal left; rising
+                // downwards tilts it up.
+                const len = Math.hypot(right, down, 1.0);
+                const i = (y * width + x) * 4;
+                data[i] = Math.round((-right / len * 0.5 + 0.5) * 255);
+                data[i + 1] = Math.round((down / len * 0.5 + 0.5) * 255);
+                data[i + 2] = Math.round((1.0 / len * 0.5 + 0.5) * 255);
+                data[i + 3] = 255;
+            }
+        }
+
+        return new Texture(width, height, data);
+    }
+
+    /**
      * A texture from a decoded image, in a browser.
      * @param {ImageBitmap | HTMLImageElement | HTMLCanvasElement | OffscreenCanvas} image
      */
@@ -107,12 +155,15 @@ export class Texture {
     /**
      * The linear colour at (u, v), blended between the four nearest
      * pixels and wrapping round at the edges: what the GPU's sampler
-     * returns.
+     * returns. With srgb false, the bytes are read as plain numbers from
+     * 0 to 1 instead, as for a normal map.
      * @param {number} u
      * @param {number} v
+     * @param {boolean} [srgb]
      */
-    sample(u, v) {
+    sample(u, v, srgb = true) {
 
+        const decode = srgb ? fromSrgbByte : fromByte;
         const x = u * this.#width - 0.5;
         const y = v * this.#height - 0.5;
         const x0 = Math.floor(x), y0 = Math.floor(y);
@@ -122,9 +173,9 @@ export class Texture {
         for (const [dx, dy, w] of [[0, 0, (1 - fx) * (1 - fy)], [1, 0, fx * (1 - fy)], [0, 1, (1 - fx) * fy], [1, 1, fx * fy]]) {
             const px = mod(x0 + dx, this.#width), py = mod(y0 + dy, this.#height);
             const i = (py * this.#width + px) * 4;
-            r += w * fromSrgbByte(this.#data[i]);
-            g += w * fromSrgbByte(this.#data[i + 1]);
-            b += w * fromSrgbByte(this.#data[i + 2]);
+            r += w * decode(this.#data[i]);
+            g += w * decode(this.#data[i + 1]);
+            b += w * decode(this.#data[i + 2]);
         }
 
         return new Vec3(r, g, b);
@@ -133,15 +184,28 @@ export class Texture {
     /**
      * This texture resized to width × height, blending neighbouring pixels
      * (in linear light), for packing textures of different sizes together.
+     * With srgb false, it blends the bytes as plain numbers, as for a
+     * normal map.
      * @param {number} width
      * @param {number} height
+     * @param {boolean} [srgb]
      */
-    resized(width, height) {
+    resized(width, height, srgb = true) {
 
         if (width == this.#width && height == this.#height)
             return this;
 
-        return Texture.procedural(width, height, (u, v) => this.sample(u, v));
+        if (srgb)
+            return Texture.procedural(width, height, (u, v) => this.sample(u, v));
+
+        const data = new Uint8Array(width * height * 4);
+        for (let y = 0; y < height; ++y) {
+            for (let x = 0; x < width; ++x) {
+                const c = this.sample((x + 0.5) / width, (y + 0.5) / height, false);
+                data.set([c.x, c.y, c.z, 1].map((n) => Math.round(n * 255)), (y * width + x) * 4);
+            }
+        }
+        return new Texture(width, height, data);
     }
 }
 
@@ -160,6 +224,11 @@ const SRGB_TO_LINEAR = Float64Array.from({ length: 256 }, (_, i) => {
 /** @param {number} byte */
 function fromSrgbByte(byte) {
     return SRGB_TO_LINEAR[byte];
+}
+
+/** @param {number} byte */
+function fromByte(byte) {
+    return byte / 255;
 }
 
 /**

@@ -1,4 +1,4 @@
-import { Material, Mesh, Scene, Sky, Vec3, hexColor } from "../src/index.mjs";
+import { Box, Material, Mesh, Scene, Sky, Vec3, hexColor } from "../src/index.mjs";
 import { cylinder, placed, profile, seededRandom } from "./helpers.mjs";
 import { valueNoise } from "./terrain.mjs";
 
@@ -29,6 +29,61 @@ export function lowPolyForest() {
         }),
     });
 
+    plantForest(scene);
+
+    return {
+        scene,
+        camera: {
+            position: new Vec3(4.5, 3.2, 8.5),
+            target: new Vec3(-0.5, 0.5, -1.0),
+            fov: 45 * Math.PI / 180,
+        },
+    };
+}
+
+/**
+ * The same forest on a misty morning, with the low sun behind the trees:
+ * the mist glows round it, and the trees' shadows stripe it with rays.
+ */
+export function mistyForest() {
+
+    const scene = new Scene({
+        sky: new Sky({
+            zenith: new Vec3(0.35, 0.45, 0.6),
+            horizon: new Vec3(0.9, 0.85, 0.8),
+            sunStrength: 6.0,
+            sunDirection: new Vec3(-0.4, 0.13, -0.9),
+            sunColor: new Vec3(1.0, 0.88, 0.7),
+            sunSize: 0.04,
+        }),
+    });
+
+    plantForest(scene, Material.diffuse(hexColor("#4f5e36")));
+
+    // The mist, lying in the valleys: thickest low down, as two layers.
+    scene.add(
+        Box.fromCorners(new Vec3(-15, -1, -15), new Vec3(15, 1.2, 15), Material.volume(new Vec3(0.95, 0.95, 0.95), 0.03, 0.8)),
+        Box.fromCorners(new Vec3(-15, 1.2, -15), new Vec3(15, 3.5, 15), Material.volume(new Vec3(0.95, 0.95, 0.95), 0.012, 0.8)));
+
+    return {
+        scene,
+        camera: {
+            position: new Vec3(4.5, 2.6, 8.5),
+            target: new Vec3(-0.5, 1.4, -1.0),
+            fov: 45 * Math.PI / 180,
+        },
+        bounces: 6,
+    };
+}
+
+/**
+ * Hills, faceted, and firs on them, with a clearing in front of the
+ * camera.
+ * @param {Scene} scene
+ * @param {Material} [ground]
+ */
+function plantForest(scene, ground = Material.diffuse(hexColor("#e8eef2"))) {
+
     const noise = valueNoise(23);
     const SIZE = 30;
 
@@ -36,7 +91,7 @@ export function lowPolyForest() {
     scene.add(Mesh.surface((u, v) => {
         const x = (u - 0.5) * SIZE, z = (0.5 - v) * SIZE;
         return new Vec3(x, groundHeight(noise, x, z), z);
-    }, 48, 48, Material.diffuse(hexColor("#e8eef2")), { shading: "flat" }));
+    }, 48, 48, ground, { shading: "flat" }));
 
     const random = seededRandom(31);
     const greens = ["#2f5d3a", "#3b6e3f", "#285040", "#4a7a45"].map((c) => Material.diffuse(hexColor(c)));
@@ -52,13 +107,4 @@ export function lowPolyForest() {
             placed(Mesh.lathe(FIR, greens[Math.floor(random() * greens.length)], { segments: 7, shading: "flat" }), x, y, z, s),
             placed(cylinder(0.07, 0.4, bark, 6), x, y, z, s));
     }
-
-    return {
-        scene,
-        camera: {
-            position: new Vec3(4.5, 3.2, 8.5),
-            target: new Vec3(-0.5, 0.5, -1.0),
-            fov: 45 * Math.PI / 180,
-        },
-    };
 }

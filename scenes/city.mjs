@@ -1,12 +1,14 @@
 import { Box, Material, Quad, Scene, Sky, Vec2, Vec3, hexColor } from "../src/index.mjs";
-import { seededRandom } from "./helpers.mjs";
-import { windows } from "./textures.mjs";
+import { seededRandom, stars } from "./helpers.mjs";
+import { streetLights, windowLights, windows } from "./textures.mjs";
 
 /**
  * The city's buildings, as boxes standing on the ground: a 12 × 12 grid
- * of blocks, tallest towards the middle, with a few parks left empty.
+ * of blocks, tallest towards the middle, with a few parks left empty. At
+ * night, the offices' windows glow.
+ * @param {{ night?: boolean }} [options]
  */
-export function buildings() {
+export function buildings({ night = false } = {}) {
 
     const random = seededRandom(1234);
     const materials = [
@@ -41,7 +43,9 @@ export function buildings() {
             if (height > 1.0) {
                 // Boxes map textures by world size: four bays every 0.6
                 // across, four floors every 0.48 up.
-                const offices = Material.plastic(material.color, 0.3).withTexture(windows(), new Vec2(1 / 0.6, 1 / 0.48), material.color.lerp(new Vec3(1, 1, 1), 0.5));
+                let offices = Material.plastic(material.color, 0.3).withTexture(windows(), new Vec2(1 / 0.6, 1 / 0.48), material.color.lerp(new Vec3(1, 1, 1), 0.5));
+                if (night)
+                    offices = offices.withEmission(new Vec3(1, 1, 1), 1.2, windowLights());
                 boxes.push(Box.fromCorners(new Vec3(cx - half, 0, cz - half), new Vec3(cx + half, height, cz + half), offices, turn));
                 boxes.push(Box.fromCorners(new Vec3(cx - half - 0.01, height, cz - half - 0.01), new Vec3(cx + half + 0.01, height + 0.03, cz + half + 0.01), material, turn));
             }
@@ -89,6 +93,44 @@ export function tinyCity() {
         camera: {
             position: new Vec3(9.5, 8.0, 10.5),
             target: new Vec3(0.0, 0.6, 0.0),
+            fov: 40.0 * Math.PI / 180.0,
+        },
+    };
+}
+
+/**
+ * The same city at night, under a crescent moon: lit windows up the
+ * offices, glowing streets, and stars.
+ */
+export function cityAtNight() {
+
+    const scene = new Scene({
+        sky: new Sky({
+            zenith: new Vec3(0.002, 0.003, 0.01),
+            horizon: new Vec3(0.02, 0.022, 0.035),
+            ground: new Vec3(0.003, 0.003, 0.004),
+            sunStrength: 0.12,
+            sunDirection: new Vec3(0.5, 0.5, -0.6),
+            sunColor: new Vec3(0.6, 0.75, 1.0),
+            sunSize: 0.03,
+        }),
+    });
+
+    // The streets run between the blocks, on whole numbers: one tile of
+    // the street lights' pattern per block.
+    scene.add(
+        new Quad(new Vec3(-50, 0, 50), new Vec3(100, 0, 0), new Vec3(0, 0, -100), Material.diffuse(hexColor("#2a2b2e"))),
+        new Quad(new Vec3(-6, 0.003, 6), new Vec3(12, 0, 0), new Vec3(0, 0, -12),
+            new Material({ color: hexColor("#2a2b2e"), emission: new Vec3(1.5, 1.5, 1.5), emissionTexture: streetLights(), textureScale: new Vec2(12, 12) })));
+
+    scene.add(...buildings({ night: true }));
+    scene.add(...stars(250, 80, 5, { above: true }));
+
+    return {
+        scene,
+        camera: {
+            position: new Vec3(9.5, 6.0, 10.5),
+            target: new Vec3(0.0, 0.9, 0.0),
             fov: 40.0 * Math.PI / 180.0,
         },
     };

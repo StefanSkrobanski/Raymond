@@ -1,6 +1,6 @@
 import { Mat4, Material, Mesh, Scene, Sky, Vec2, Vec3, hexColor } from "../src/index.mjs";
 import { profile } from "./helpers.mjs";
-import { sandstoneBlocks } from "./textures.mjs";
+import { sandstoneBlocks, sandstoneBumps } from "./textures.mjs";
 import { valueNoise } from "./terrain.mjs";
 
 /**
@@ -44,11 +44,11 @@ export function pyramids() {
     // Courses of blocks: each face is a quarter of the way round (u) and
     // the top third of the profile (v), so this puts 16 blocks across a
     // face and 32 courses up it.
-    const stone = Material.diffuse(new Vec3(1, 1, 1)).withTexture(sandstoneBlocks(), new Vec2(4, 6));
+    const stone = Material.diffuse(new Vec3(1, 1, 1)).withTexture(sandstoneBlocks(), new Vec2(4, 6)).withNormalMap(sandstoneBumps(), 2);
     scene.add(
         pyramid(9, 6.0, stone).transformed(Mat4.translate(0, -0.3, 0)),
         pyramid(8, 5.5, stone).transformed(Mat4.translate(-11, -0.3, -9)),
-        pyramid(4.5, 3.0, Material.diffuse(new Vec3(1, 1, 1)).withTexture(sandstoneBlocks(), new Vec2(4, 3), hexColor("#f0e0c8"))).transformed(Mat4.translate(-19, -0.3, -16)));
+        pyramid(4.5, 3.0, Material.diffuse(new Vec3(1, 1, 1)).withTexture(sandstoneBlocks(), new Vec2(4, 3), hexColor("#f0e0c8")).withNormalMap(sandstoneBumps(), 2)).transformed(Mat4.translate(-19, -0.3, -16)));
 
     return {
         scene,

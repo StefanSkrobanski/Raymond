@@ -62,4 +62,19 @@ const uv: Vec2 | undefined = scene.add(globe, strip).raycast(new Vec3(0, 1, 5), 
 // @ts-expect-error: a texture's scale is a number or a Vec2
 Material.diffuse(new Vec3(1, 1, 1)).withTexture(checks, "2");
 
-export { pixels, denoised, distance, stick, loaded, uv };
+const bumps: Texture = Texture.normalMap(64, 64, (u, v) => 0.01 * Math.sin(u * 20) * Math.sin(v * 20));
+const bumpy: Material = Material.plastic(new Vec3(0.8, 0.2, 0.2)).withTexture(checks).withNormalMap(bumps, 1.5);
+const screen: Material = Material.diffuse(new Vec3(0, 0, 0)).withEmission(new Vec3(1, 1, 1), 3, checks);
+const flint: Material = Material.glass(1.65, new Vec3(1, 1, 1), 30);
+const redder: number = flint.iorAt(700) - flint.iorAt(400);
+const haze: Material = Material.volume(new Vec3(0.9, 0.9, 0.9), 0.2, 0.6);
+scene.add(new Box(Mat4.scale(5, 5, 5), haze), new Sphere(new Vec3(0, 0, 0), 1, flint), new Sphere(new Vec3(2, 0, 0), 1, bumpy));
+const glows: boolean = screen.glows;
+
+// @ts-expect-error: a normal map's strength is a number
+bumpy.withNormalMap(bumps, "deep");
+
+// @ts-expect-error: volumes need a density
+Material.volume(new Vec3(1, 1, 1));
+
+export { pixels, denoised, distance, stick, loaded, uv, redder, glows };

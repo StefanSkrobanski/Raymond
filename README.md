@@ -8,20 +8,21 @@ A progressive path tracer for WebGPU, in plain JavaScript ES modules with no dep
 
 - **Path tracing in a compute shader**, with next event estimation (aiming rays straight at lights) combined with BSDF sampling by multiple importance sampling, and Russian roulette to end dim paths.
 - **Shapes:** spheres, quads (flat parallelograms), boxes under any affine transform (including sticks between two points), and triangle meshes with smooth or flat shading: generated spheres, tori, tubes round any closed curve, solids turned on a lathe, and parametric surfaces. Everything goes in one bounding volume hierarchy, built on the CPU with the surface area heuristic and traversed on the GPU.
-- **Materials:** diffuse, metal and plastic (GGX microfacets, from polished to rough), glass (exact Fresnel, refraction, tint), lights, and 3D checkerboards.
-- **Textures** on every shape: from image files (`Texture.load`) or drawn by a function (`Texture.procedural`), filtered and repeating, with spheres mapped by latitude and longitude, box faces by their size in world units, and meshes by their own texture coordinates (generated for the built-in shapes). The demo's wood, marble, brick, stone and planets are all procedural.
+- **Materials:** diffuse, metal and plastic (GGX microfacets, from polished to rough), glass (exact Fresnel, refraction, tint, and optionally dispersion, which splits white light into rainbows by tracing a wavelength per path), lights, glowing surfaces, and 3D checkerboards.
+- **Fog, smoke and haze:** spheres and boxes filled with a scattering medium (Henyey-Greenstein phase function, sampled exactly and aimed at lights through the fog), for sunbeams and mist.
+- **Textures** on every shape: from image files (`Texture.load`) or drawn by a function (`Texture.procedural`), filtered and repeating, with spheres mapped by latitude and longitude, box faces by their size in world units, and meshes by their own texture coordinates (generated for the built-in shapes). Normal maps add bumps (made from a height function with `Texture.normalMap`), and emission textures make patterns glow: lit windows, city lights, the sun's surface. The demo's wood, marble, brick, stone, planets and their bumps are all procedural.
 - **Lights:** emissive quads and spheres, sampled directly; a sky gradient; a sun with a soft-edged disc.
 - **A denoiser** that clears the grain from the first few samples: an edge-avoiding à-trous wavelet filter guided by each pixel's albedo, normal and distance, and steered by an estimate of its noise (as in SVGF), so it backs off as the samples build up and the image still converges to the exact answer.
 - **A thin-lens camera** with depth of field, and **inspection views** of albedo, normals and depth.
 - **Orbit controls** for mouse, touch and pen, adapted from [Styx](https://github.com/StefanSkrobanski/Styx), whose maths library Raymond also uses.
 - **A CPU raycast** with exactly the shader's tests, on the same packed data, for picking (tap to focus) and for testing the GPU.
 
-The demo app has 43 scenes in five groups:
+The demo app has 46 scenes in five groups:
 
 - **Classics:** two Cornell boxes, a field of spheres, a material chart, a texture gallery and Eric Haines's sphereflake.
-- **Light and glass:** a glass garden, a swimming pool and a coffee cup's caustics, cut gems, a hall of mirrors, sunbeams through a blind, neon, a crystal cave, candlelight, a magnifying glass and a glass of water.
+- **Light and glass:** a glass garden, a swimming pool and a coffee cup's caustics, cut gems, a hall of mirrors, sunbeams through a blind, neon, a crystal cave, candlelight, a magnifying glass, a glass of water and a prism.
 - **Objects:** a still life, Newton's cradle, chess, bowling, billiards, a Rubik's cube, toy bricks, a pendulum wave, a domino spiral, DNA, an atom and a rocket launch.
-- **Places:** an island at sunset, a tiny city, the solar system, Stonehenge, a spiral staircase, a low-poly forest, a snowman, a lighthouse, the pyramids and hot-air balloons.
+- **Places:** an island at sunset, a tiny city by day and by night, the solar system, Stonehenge, a spiral staircase, a low-poly forest (and the same forest on a misty morning), a snowman, a lighthouse, the pyramids and hot-air balloons.
 - **Maths:** a Menger sponge, seashells, a Sierpinski tetrahedron, and a Möbius strip, Klein bottle and Dini's surface.
 
 ## Using the library
@@ -65,6 +66,23 @@ scene.add(new Sphere(new Vec3(0, 1, 0), 1, Material.diffuse(new Vec3(1, 1, 1)).w
 ```
 
 `withTexture(texture, scale)` repeats it `scale` times (a number, or a `Vec2` for across and down) over a sphere, a quad or a mesh's texture coordinates, and `scale` times per unit of length on a box's faces. A mesh takes its texture coordinates as `{ uvs }`, one `Vec2` per vertex.
+
+More, on any material:
+
+```js
+// Bumps: heights as fractions of the texture's width.
+const dimples = Texture.normalMap(256, 256, (u, v) => 0.01 * Math.sin(u * 40) * Math.sin(v * 40));
+const golfBall = Material.plastic(new Vec3(0.9, 0.9, 0.9), 0.3).withNormalMap(dimples);
+
+// Glowing, in a pattern (lights are sampled directly; glowing surfaces aren't).
+const screen = Material.diffuse(new Vec3(0, 0, 0)).withEmission(new Vec3(1, 1, 1), 3, await Texture.load("tv.png"));
+
+// Glass that splits colours: the last argument is its Abbe number (lower is more).
+const prism = Material.glass(1.65, new Vec3(1, 1, 1), 20);
+
+// Haze filling a box: colour (what it scatters rather than absorbs), density, anisotropy.
+scene.add(Box.fromCorners(new Vec3(-5, 0, -5), new Vec3(5, 3, 5), Material.volume(new Vec3(0.95, 0.95, 0.95), 0.1, 0.6)));
+```
 
 ## Running and testing
 
