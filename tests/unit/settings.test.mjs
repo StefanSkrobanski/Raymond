@@ -17,6 +17,7 @@ test("sanitizeSettings falls back to the defaults field by field", () => {
         sample_limit: 0,
         tame_fireflies: "yes",
         denoise: false,
+        fast_preview: 1,
         theme: "dark",
     });
 
@@ -29,6 +30,7 @@ test("sanitizeSettings falls back to the defaults field by field", () => {
     assert.equal(s.sample_limit, 0);
     assert.equal(s.tame_fireflies, DEFAULT_SETTINGS.tame_fireflies);
     assert.equal(s.denoise, false);
+    assert.equal(s.fast_preview, DEFAULT_SETTINGS.fast_preview);
     assert.equal(s.theme, "dark");
 });
 

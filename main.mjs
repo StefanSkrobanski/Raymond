@@ -19,6 +19,15 @@ const settings = loadSettings();
 // mountain.
 const APERTURE_SCALE = 0.04;
 
+// The fast preview while the camera moves: how long a frame should take,
+// the most bounces, the range of its resolution (a fraction of the full
+// one, each way), and how long after the last move to go back to full
+// quality.
+const PREVIEW_FRAME_MS = 33;
+const PREVIEW_BOUNCES = 3;
+const PREVIEW_SCALES = { min: 0.15, max: 1.0 };
+const SETTLE_MS = 250;
+
 let renderer;
 try {
     renderer = await Renderer.create(canvas);
@@ -49,6 +58,15 @@ let frame_ms = 0.0;
 let aperture = 0.0;
 // The scene's field of view, kept across the narrower side of the window.
 let scene_fov = camera.fov;
+// Whether the camera is moving, so the preview is showing, and the
+// preview's resolution, which adapts to the device and is kept between
+// moves.
+let moving = false;
+let preview_scale = 0.5;
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let settle_timer;
+// Set while a scene places the camera, which isn't moving it.
+let placing = false;
 
 // ---- Drawing ----
 
@@ -91,8 +109,12 @@ async function frame() {
     renderer.render();
     await renderer.device.queue.onSubmittedWorkDone();
 
-    frame_ms = 0.8 * frame_ms + 0.2 * (performance.now() - start);
+    const ms = performance.now() - start;
+    frame_ms = 0.8 * frame_ms + 0.2 * ms;
     in_flight = false;
+
+    if (moving)
+        adaptPreview(ms);
 
     updateStats();
 
@@ -107,7 +129,7 @@ function updateStats() {
 
     $("stats").textContent =
         `${renderer.samples}${limit} samples · ${canvas.width}×${canvas.height} · ${frame_ms.toFixed(0)} ms${view}` +
-        (playing ? "" : " · paused");
+        (moving ? " · preview" : "") + (playing ? "" : " · paused");
 
     const fraction = settings.sample_limit > 0 ? Math.min(renderer.samples / settings.sample_limit, 1.0) : 0.0;
     $("progress").firstElementChild.style.width = `${(fraction * 100).toFixed(1)}%`;
@@ -117,7 +139,8 @@ function updateStats() {
 
 function resize() {
 
-    const ratio = settings.resolution > 0 ? settings.resolution : (window.devicePixelRatio || 1);
+    const full = settings.resolution > 0 ? settings.resolution : (window.devicePixelRatio || 1);
+    const ratio = moving ? full * preview_scale : full;
     const width = Math.max(1, Math.round(canvas.clientWidth * ratio));
     const height = Math.max(1, Math.round(canvas.clientHeight * ratio));
 
@@ -136,6 +159,52 @@ function resize() {
 
 new ResizeObserver(resize).observe(canvas);
 
+// ---- The fast preview ----
+
+// The camera has moved: show the preview until it's been still a moment.
+function moved() {
+
+    if (!settings.fast_preview || placing)
+        return;
+
+    clearTimeout(settle_timer);
+    settle_timer = setTimeout(() => {
+        moving = false;
+        applyQuality();
+    }, SETTLE_MS);
+
+    if (!moving) {
+        moving = true;
+        applyQuality();
+    }
+}
+
+// Nudges the preview's resolution towards drawing a frame in
+// PREVIEW_FRAME_MS: the time goes with the number of pixels, so with the
+// square of the scale. Small changes are left, since each new size means
+// new buffers.
+/** @param {number} ms how long the last preview frame took */
+function adaptPreview(ms) {
+
+    const wanted = preview_scale * Math.min(Math.max(Math.sqrt(PREVIEW_FRAME_MS / Math.max(ms, 1)), 0.7), 1.3);
+    const scale = Math.min(Math.max(wanted, PREVIEW_SCALES.min), PREVIEW_SCALES.max);
+
+    if (Math.abs(scale / preview_scale - 1.0) > 0.1) {
+        preview_scale = scale;
+        resize();
+    }
+}
+
+// The renderer's settings that the preview cheapens: fewer bounces, one
+// sample a frame, always denoised.
+function applyQuality() {
+    renderer.maxBounces = moving ? Math.min(settings.bounces, PREVIEW_BOUNCES) : settings.bounces;
+    renderer.samplesPerFrame = moving ? 1 : settings.samples_per_frame;
+    renderer.denoise = moving || settings.denoise;
+    resize();
+    updateStats();
+}
+
 // ---- Scenes and settings ----
 
 /** @param {{ changed?: boolean }} [options] changed: picked in the panel, rather than restored */
@@ -151,7 +220,9 @@ function loadScene({ changed = false } = {}) {
 
     const target = options.target ?? camera.target;
     const position = options.position ?? camera.position;
+    placing = true;
     controls.setHome(OrbitControls.viewFrom(position, target), { animate: false });
+    placing = false;
 
     const focus = camera.effectiveFocusDistance;
     aperture = Math.min((options.aperture ?? 0.0) / (focus * APERTURE_SCALE), 1.0);
@@ -168,11 +239,8 @@ function loadScene({ changed = false } = {}) {
 function applySettings() {
 
     renderer.view = /** @type {import("./src/Renderer.mjs").View} */ (settings.view);
-    renderer.maxBounces = settings.bounces;
-    renderer.samplesPerFrame = settings.samples_per_frame;
     renderer.exposure = 2.0 ** settings.exposure;
     renderer.fireflyClamp = settings.tame_fireflies ? 10.0 : 0.0;
-    renderer.denoise = settings.denoise;
     camera.aperture = aperture * APERTURE_SCALE * camera.effectiveFocusDistance;
 
     $("bounces").value = settings.bounces;
@@ -184,10 +252,11 @@ function applySettings() {
     $("aperture-value").textContent = aperture > 0 ? aperture.toFixed(2) : "Pinhole";
     $("tame-fireflies").checked = settings.tame_fireflies;
     $("denoise").checked = settings.denoise;
+    $("fast-preview").checked = settings.fast_preview;
 
     saveSettings(settings);
     applyTheme();
-    resize();
+    applyQuality();
 }
 
 /**
@@ -259,6 +328,15 @@ $("denoise").addEventListener("change", () => {
     applySettings();
 });
 
+$("fast-preview").addEventListener("change", () => {
+    settings.fast_preview = $("fast-preview").checked;
+    if (!settings.fast_preview) {
+        clearTimeout(settle_timer);
+        moving = false;
+    }
+    applySettings();
+});
+
 // ---- Theme ----
 
 const dark_query = matchMedia("(prefers-color-scheme: dark)");
@@ -272,7 +350,10 @@ dark_query.addEventListener("change", applyTheme);
 
 // ---- Controls ----
 
-controls.addEventListener("change", invalidate);
+controls.addEventListener("change", () => {
+    moved();
+    invalidate();
+});
 
 // Tapping the image focuses the lens on whatever is there.
 controls.addEventListener("tap", (e) => {
