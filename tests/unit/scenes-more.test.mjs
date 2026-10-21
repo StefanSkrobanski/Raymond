@@ -12,6 +12,7 @@ import { cityAtNight, tinyCity } from "../../scenes/city.mjs";
 import { COUNT, dominoLayout } from "../../scenes/dominoes.mjs";
 import { mistyForest } from "../../scenes/forest.mjs";
 import { lensProfile } from "../../scenes/magnifier.mjs";
+import { SHELL_RADIUS, floatingSpheres, mirrorBall } from "../../scenes/mirrorball.mjs";
 import { pendulums } from "../../scenes/pendulum.mjs";
 import { prismMesh } from "../../scenes/prism.mjs";
 import { rubiksCube } from "../../scenes/rubik.mjs";
@@ -224,4 +225,28 @@ test("the misty forest's mist lies over the whole forest, thickest low down", ()
         assert.ok(Math.abs(p.x) < low.max.x && Math.abs(p.z) < low.max.z);
     }
     assert.ok(camera.position.y < high.max.y, "the camera is in it");
+});
+
+test("inside the mirror ball, the spheres float near the middle, clear of each other and the camera, and their reflections too", () => {
+
+    const spheres = floatingSpheres();
+    const kinds = new Set(spheres.map((s) => s.material.type));
+    for (const kind of ["light", "glass", "diffuse", "plastic", "metal"])
+        assert.ok(kinds.has(kind), `a ${kind} sphere`);
+
+    const { camera } = mirrorBall();
+    const eye = camera.position;
+    assert.ok(eye.length() < SHELL_RADIUS / 4, "the camera is well inside the mirror");
+
+    for (const [i, a] of spheres.entries()) {
+        // Well short of the focus, halfway out, where reflections are
+        // magnified into smears.
+        assert.ok(a.center.length() + a.radius < SHELL_RADIUS / 3, `sphere ${i} near the middle`);
+        assert.ok(a.center.subtract(eye).length() > a.radius + 1, `sphere ${i} clear of the camera`);
+        // Its reflection near the middle is upside down, opposite it
+        // through the centre: kept away from the camera, where it'd loom.
+        assert.ok(a.center.negate().subtract(eye).length() > 2.5, `sphere ${i}'s reflection clear of the camera`);
+        for (const b of spheres.slice(i + 1))
+            assert.ok(a.center.subtract(b.center).length() > a.radius + b.radius + 0.1, `sphere ${i} clear of the others`);
+    }
 });

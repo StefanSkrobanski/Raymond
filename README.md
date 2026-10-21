@@ -17,10 +17,10 @@ A progressive path tracer for WebGPU, in plain JavaScript ES modules with no dep
 - **Orbit controls** for mouse, touch and pen, adapted from [Styx](https://github.com/StefanSkrobanski/Styx), whose maths library Raymond also uses.
 - **A CPU raycast** with exactly the shader's tests, on the same packed data, for picking (tap to focus) and for testing the GPU.
 
-The demo app has 46 scenes in five groups:
+The demo app has 47 scenes in five groups:
 
 - **Classics:** two Cornell boxes, a field of spheres, a material chart, a texture gallery and Eric Haines's sphereflake.
-- **Light and glass:** a glass garden, a swimming pool and a coffee cup's caustics, cut gems, a hall of mirrors, sunbeams through a blind, neon, a crystal cave, candlelight, a magnifying glass, a glass of water and a prism.
+- **Light and glass:** a glass garden, a swimming pool and a coffee cup's caustics, cut gems, a hall of mirrors, the inside of a mirror ball, sunbeams through a blind, neon, a crystal cave, candlelight, a magnifying glass, a glass of water and a prism.
 - **Objects:** a still life, Newton's cradle, chess, bowling, billiards, a Rubik's cube, toy bricks, a pendulum wave, a domino spiral, DNA, an atom and a rocket launch.
 - **Places:** an island at sunset, a tiny city by day and by night, the solar system, Stonehenge, a spiral staircase, a low-poly forest (and the same forest on a misty morning), a snowman, a lighthouse, the pyramids and hot-air balloons.
 - **Maths:** a Menger sponge, seashells, a Sierpinski tetrahedron, and a Möbius strip, Klein bottle and Dini's surface.
