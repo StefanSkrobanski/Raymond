@@ -28,6 +28,11 @@ const GPU_LAUNCH = {
     args: ["--enable-unsafe-webgpu", "--enable-features=Vulkan", "--use-vulkan=swiftshader", "--use-angle=swiftshader"],
 };
 
+// How long to wait for the app's first frames, or a screenshot: on a slow
+// CI runner, compiling the shaders and drawing a frame on SwiftShader can
+// take minutes.
+const SLOW_FRAME_MS = 180000;
+
 let server;
 let browser;
 let base_url;
@@ -616,14 +621,14 @@ test("the app accumulates samples and reports them", async () => {
 
     const { page, errors, context } = await open("index.html");
 
-    await page.waitForFunction(() => window.raymond?.renderer.samples >= 4, null, { timeout: 60000 });
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 4, null, { timeout: SLOW_FRAME_MS });
 
     assert.equal(await page.isHidden("#error"), true);
     assert.match(await page.textContent("#stats"), /^\d+ \/ 4096 samples · 480×320/);
     assert.equal(await page.textContent("#scene-name"), "Cornell box");
 
     // The image is on screen, and isn't black.
-    const shot = decodePng(await page.screenshot());
+    const shot = decodePng(await page.screenshot({ timeout: SLOW_FRAME_MS }));
     const centre = shot.pixel(240, 200);
     assert.ok(centre[0] + centre[1] + centre[2] > 60, `centre pixel ${centre}`);
 
@@ -634,7 +639,7 @@ test("the app accumulates samples and reports them", async () => {
 test("pausing stops the samples, and a camera move still redraws", async () => {
 
     const { page, context } = await open("index.html");
-    await page.waitForFunction(() => window.raymond?.renderer.samples >= 2, null, { timeout: 60000 });
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 2, null, { timeout: SLOW_FRAME_MS });
 
     await page.click("#play");
     await page.waitForTimeout(500);
@@ -649,7 +654,7 @@ test("pausing stops the samples, and a camera move still redraws", async () => {
     await page.mouse.down();
     await page.mouse.move(300, 160, { steps: 4 });
     await page.mouse.up();
-    await page.waitForFunction(() => window.raymond.renderer.samples == 1, null, { timeout: 30000 });
+    await page.waitForFunction(() => window.raymond.renderer.samples == 1, null, { timeout: SLOW_FRAME_MS });
     assert.notEqual(await page.evaluate(() => window.raymond.camera.position.x), before);
 
     await context.close();
@@ -658,7 +663,7 @@ test("pausing stops the samples, and a camera move still redraws", async () => {
 test("moving the camera shows a fast preview, then the full image once it stops", async () => {
 
     const { page, errors, context } = await open("index.html");
-    await page.waitForFunction(() => window.raymond?.renderer.samples >= 2, null, { timeout: 60000 });
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 2, null, { timeout: SLOW_FRAME_MS });
 
     const full = await page.evaluate(() => ({ width: document.getElementById("view").width, bounces: window.raymond.renderer.maxBounces }));
     const now = () => page.evaluate(() => ({
@@ -682,14 +687,14 @@ test("moving the camera shows a fast preview, then the full image once it stops"
     // Held still, then let go: back to full quality.
     await page.waitForTimeout(600);
     await page.mouse.up();
-    await page.waitForFunction((w) => document.getElementById("view").width == w, full.width, { timeout: 30000 });
+    await page.waitForFunction((w) => document.getElementById("view").width == w, full.width, { timeout: SLOW_FRAME_MS });
     const after = await now();
     assert.equal(after.bounces, full.bounces);
     assert.doesNotMatch(after.stats, /preview/);
 
     // With the preview turned off, moving keeps the full image.
-    await page.click("#settings-button");
-    await page.click("#fast-preview");
+    await page.click("#settings-button", { timeout: SLOW_FRAME_MS });
+    await page.click("#fast-preview", { timeout: SLOW_FRAME_MS });
     await page.mouse.move(240, 160);
     await page.mouse.down();
     await page.mouse.move(270, 170, { steps: 4 });
@@ -706,9 +711,9 @@ test("moving the camera shows a fast preview, then the full image once it stops"
 test("the settings panel changes the scene, view and resolution, and remembers them", async () => {
 
     const { page, errors, context } = await open("index.html");
-    await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: 60000 });
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: SLOW_FRAME_MS });
 
-    await page.click("#settings-button");
+    await page.click("#settings-button", { timeout: SLOW_FRAME_MS });
     await page.selectOption("#scene", "spheres");
     await page.waitForFunction(() => document.getElementById("scene-name").textContent == "Sphere field");
 
@@ -723,7 +728,7 @@ test("the settings panel changes the scene, view and resolution, and remembers t
 
     // Reloading keeps them.
     await page.reload();
-    await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: 60000 });
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: SLOW_FRAME_MS });
     assert.equal(await page.textContent("#scene-name"), "Sphere field");
     assert.equal(await page.inputValue("#view-mode"), "normal");
 
@@ -734,9 +739,9 @@ test("the settings panel changes the scene, view and resolution, and remembers t
 test("turning denoising off and on doesn't start the image again", async () => {
 
     const { page, context } = await open("index.html");
-    await page.waitForFunction(() => window.raymond?.renderer.samples >= 3, null, { timeout: 60000 });
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 3, null, { timeout: SLOW_FRAME_MS });
 
-    await page.click("#settings-button");
+    await page.click("#settings-button", { timeout: SLOW_FRAME_MS });
     const before = await page.evaluate(() => window.raymond.renderer.samples);
     await page.uncheck("#denoise");
     await page.waitForFunction(() => window.raymond.renderer.denoise == false);
@@ -752,7 +757,7 @@ test("turning denoising off and on doesn't start the image again", async () => {
 test("tapping the image focuses there", async () => {
 
     const { page, context } = await open("index.html");
-    await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: 60000 });
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: SLOW_FRAME_MS });
 
     // The middle of the Cornell box's back wall, about 4.85 away along
     // the view direction (the camera is at z = 3.85, the wall at z = -1).
@@ -768,7 +773,7 @@ test("tapping the image focuses there", async () => {
 test("the save button downloads the image as a PNG", async () => {
 
     const { page, context } = await open("index.html");
-    await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: 60000 });
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: SLOW_FRAME_MS });
 
     const [download] = await Promise.all([page.waitForEvent("download"), page.click("#save")]);
     assert.match(download.suggestedFilename(), /^raymond-cornell-\d+spp\.png$/);
@@ -791,7 +796,7 @@ test("the example page renders with the library by its package name", async () =
     let sky = [0, 0, 0];
     for (const deadline = Date.now() + 90000; sky[2] <= 100 && Date.now() < deadline;) {
         await page.waitForTimeout(1000);
-        sky = decodePng(await page.screenshot({ timeout: 60000 })).pixel(320, 20);
+        sky = decodePng(await page.screenshot({ timeout: SLOW_FRAME_MS })).pixel(320, 20);
     }
     assert.ok(sky[2] > 100, `the sky is blue: ${sky}`);
 
