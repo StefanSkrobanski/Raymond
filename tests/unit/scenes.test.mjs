@@ -4,6 +4,7 @@ import { Box, Camera, Material, Mesh, Quad, Sphere, Vec3 } from "../../src/index
 import { SCENES } from "../../Scenes.mjs";
 import { buildings } from "../../scenes/city.mjs";
 import { cornellBox } from "../../scenes/cornell.mjs";
+import { SHELL_RADIUS } from "../../scenes/mirrorball.mjs";
 import { BALL_RADIUS, ballCentres } from "../../scenes/cradle.mjs";
 import { basePairs } from "../../scenes/dna.mjs";
 import { gemMesh } from "../../scenes/gems.mjs";
@@ -53,7 +54,9 @@ test("every camera looks at something, from outside it", () => {
                     centre_hits++;
 
                 // Seeing the inside of a sphere or a closed glass mesh would
-                // mean the camera is in it.
+                // mean the camera is in it: only the mirror ball means that.
+                if (demo.id == "mirror-ball" && hit.object instanceof Sphere && hit.object.radius == SHELL_RADIUS)
+                    continue;
                 if (hit.object instanceof Sphere || hit.object instanceof Mesh && hit.material.type == "glass")
                     assert.ok(hit.frontFace, `${demo.id}: camera outside the ${hit.object.constructor.name}`);
             }
