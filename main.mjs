@@ -202,6 +202,7 @@ function applyQuality() {
     renderer.samplesPerFrame = moving ? 1 : settings.samples_per_frame;
     renderer.denoise = moving || settings.denoise;
     resize();
+    updateStats();
 }
 
 // ---- Scenes and settings ----
