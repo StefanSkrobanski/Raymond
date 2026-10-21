@@ -19,7 +19,7 @@ struct Params {
     sun_radiance: vec3f, max_bounces: u32,
     view: u32, volume_count: u32, env_strength: f32, env_rotation: f32,  // env_strength: 0 for no environment map
     width: u32, height: u32, sample_offset: u32, samples_per_frame: u32,
-    total_samples: u32, exposure: f32, denoise: u32, _pad4: u32,
+    total_samples: u32, exposure: f32, denoise: u32, caustics: u32,  // caustics: light tracing is on
 }
 
 const VIEW_COLOR = 0u;
@@ -83,6 +83,12 @@ struct Material {
 @group(0) @binding(8) var<storage, read_write> guide_normal: array<vec4f>;
 @group(0) @binding(9) var textures: texture_2d_array<f32>;
 @group(0) @binding(10) var texture_sampler: sampler;
+// For light tracing: the light it adds to each pixel this frame, in fixed
+// point (4 per pixel), and the lights it starts from, two vec4s each (see
+// Renderer.#writeEmitters).
+@group(0) @binding(15) var<storage, read_write> splats: array<atomic<u32>>;
+@group(0) @binding(16) var<storage, read> emitters: array<vec4f>;
+
 // Normal maps, read as plain numbers rather than sRGB.
 @group(0) @binding(11) var normal_maps: texture_2d_array<f32>;
 // The environment map, and the table for picking directions from it: see
@@ -1047,6 +1053,10 @@ fn radiance(px: vec2f) -> vec3f {
     // Once a path meets glass that splits colours, it follows one
     // wavelength, in nanometres; 0 until then.
     var wavelength = 0.0;
+    // Whether the path so far is the camera, a surface that isn't a mirror
+    // or glass, then only mirrors and glass: with light tracing on, the
+    // light it would find at the end of that is light tracing's to count.
+    var caustic = false;
 
     for (var depth = 0u; depth <= params.max_bounces; depth++) {
 
@@ -1092,6 +1102,8 @@ fn radiance(px: vec2f) -> vec3f {
             o = p;
             d = wi;
 
+            caustic = false;
+
             if (!roulette(&throughput, depth)) {
                 break;
             }
@@ -1109,7 +1121,7 @@ fn radiance(px: vec2f) -> vec3f {
                 sky_weight = power_heuristic(last_pdf, env_pdf(d) / f32(choices));
             }
             result += throughput * sky(d) * sky_weight;
-            if (in_sun(d)) {
+            if (in_sun(d) && !(caustic && last_delta)) {
                 var w = 1.0;
                 if (!last_delta) {
                     w = power_heuristic(last_pdf, 1.0 / (f32(choices) * 2.0 * PI * params.sun_omc));
@@ -1132,8 +1144,10 @@ fn radiance(px: vec2f) -> vec3f {
             g_normal = vec4f(s.n, travelled);
         }
 
-        // Lights, and glowing surfaces, give off light from their fronts.
-        if (s.front && any(m.emission > vec3f(0.0))) {
+        // Lights, and glowing surfaces, give off light from their fronts;
+        // but a light seen through mirrors and glass from the first surface
+        // is left to light tracing.
+        if (s.front && any(m.emission > vec3f(0.0)) && !(caustic && last_delta && s.light != NONE)) {
             var w = 1.0;
             if (!last_delta && s.light != NONE) {
                 w = power_heuristic(last_pdf, light_pdf(hit.prim, last_p, d, hit.t));
@@ -1143,6 +1157,13 @@ fn radiance(px: vec2f) -> vec3f {
 
         if (m.kind == LIGHT) {
             break;
+        }
+
+        if (depth == 0u) {
+            caustic = params.caustics != 0u && !is_delta(m);
+        }
+        else if (!is_delta(m)) {
+            caustic = false;
         }
 
         if (depth == params.max_bounces) {
@@ -1167,20 +1188,7 @@ fn radiance(px: vec2f) -> vec3f {
             }
         }
 
-        // Glass that splits colours: choose a wavelength, if none yet, and
-        // carry its colour; from then on, glass bends this path by its
-        // index of refraction at that wavelength (Cauchy's equation).
-        var sm = m;
-        if (m.kind == GLASS && m.dispersion > 0.0) {
-            if (wavelength == 0.0) {
-                wavelength = 380.0 + 340.0 * spectrum_u;
-                throughput *= wavelength_rgb(wavelength);
-            }
-            let l = wavelength * 1e-3;
-            sm.ior = m.ior + m.dispersion * (1.0 / (l * l) - 1.0 / (0.5876 * 0.5876));
-        }
-
-        let bs = sample_bsdf(sm, base, s, wo);
+        let bs = sample_bsdf(dispersed(m, &wavelength, &throughput, spectrum_u), base, s, wo);
         if (!bs.ok) {
             break;
         }
@@ -1246,6 +1254,252 @@ fn inspect(px: vec2f) -> vec3f {
             return vec3f(hit.t);
         }
     }
+}
+
+// Glass that splits colours: chooses a wavelength from u, if the path has
+// none yet, and carries its colour; from then on, glass bends the path by
+// its index of refraction at that wavelength (Cauchy's equation).
+fn dispersed(m: Material, wavelength: ptr<function, f32>, throughput: ptr<function, vec3f>, u: f32) -> Material {
+    var sm = m;
+    if (m.kind == GLASS && m.dispersion > 0.0) {
+        if (*wavelength == 0.0) {
+            *wavelength = 380.0 + 340.0 * u;
+            *throughput *= wavelength_rgb(*wavelength);
+        }
+        let l = *wavelength * 1e-3;
+        sm.ior = m.ior + m.dispersion * (1.0 / (l * l) - 1.0 / (0.5876 * 0.5876));
+    }
+    return sm;
+}
+
+// ---- Light tracing ----
+//
+// Caustics (light from a lamp or the sun focused by mirrors and glass onto
+// a surface) take path tracing ages, since a path from that surface must
+// find its way back through the glass to the light by chance. Light
+// tracing follows light the other way: from a light, through mirrors and
+// glass, to the first other surface, which it connects to the camera.
+// The two split the paths between them: the path tracer leaves out
+// camera, surface, mirrors or glass, light (see caustic in radiance()),
+// and light tracing counts only those. It works for the pinhole camera.
+
+// Each photon's light is added to its pixel in fixed point, 1/SPLAT_SCALE
+// at a time, rounded up or down at random in proportion, so on average
+// nothing is lost however faint each photon (a pixel can take 65536 a
+// frame before its 32 bits overflow).
+const SPLAT_SCALE = 65536.0;
+
+// Adds a photon's light to the pixel that sees surface s, if the camera
+// sees it: beta is the photon's power, arriving along d.
+fn splat(s: Surface, m: Material, base: vec3f, d: vec3f, beta: vec3f) {
+
+    let to_camera = params.cam_pos - s.p;
+    let dist = length(to_camera);
+    let wo = to_camera / dist;
+    let cos_film = -dot(wo, params.cam_forward);
+    if (cos_film <= 1e-6 || dot(wo, s.ng) <= 0.0) {
+        return;
+    }
+
+    // Where it falls on the film, a unit in front of the camera.
+    let x = -dot(wo, params.cam_right) / (cos_film * params.tan_half_fov * params.aspect);
+    let y = -dot(wo, params.cam_up) / (cos_film * params.tan_half_fov);
+    let px = (x + 1.0) * 0.5 * f32(params.width);
+    let py = (1.0 - y) * 0.5 * f32(params.height);
+    if (px < 0.0 || py < 0.0 || px >= f32(params.width) || py >= f32(params.height)) {
+        return;
+    }
+
+    let wi = -d;
+    let e = eval_bsdf(m, base, s.n, wo, wi);
+    let cos_in = dot(s.n, wi);
+    if (e.pdf <= 0.0 || cos_in <= 0.0) {
+        return;
+    }
+
+    let origin = offset(s, wo);
+    if (occluded(origin, wo, dist - dot(origin - s.p, wo))) {
+        return;
+    }
+
+    // The pixel's average radiance: the BSDF (without the photon's cosine,
+    // which its spacing already holds), from the surface's area to the
+    // solid angle at the camera, and from that to the pixel's area on the
+    // film.
+    let pixel_area = (4.0 * params.tan_half_fov * params.tan_half_fov * params.aspect) / f32(params.width * params.height);
+    let value = beta * (e.f / cos_in) * dot(wo, s.ng) / (dist * dist * pixel_area * cos_film * cos_film * cos_film);
+
+    if (!finite(value)) {
+        return;
+    }
+
+    let index = (u32(py) * params.width + u32(px)) * 4u;
+    let fixed = vec3u(min(value * SPLAT_SCALE + vec3f(rand(), rand(), rand()), vec3f(4e9)));
+    atomicAdd(&splats[index], fixed.x);
+    atomicAdd(&splats[index + 1u], fixed.y);
+    atomicAdd(&splats[index + 2u], fixed.z);
+}
+
+// The photons each frame: one per sample, up to as many as one dispatch of
+// 64-wide workgroups can take (Renderer.#photons() agrees).
+fn photon_count() -> u32 {
+    return min(params.width * params.height * params.samples_per_frame, 65535u * 64u);
+}
+
+// One photon, of photon_count(): from a light chosen by power, through
+// mirrors and glass, splatted where it first lands on anything else.
+@compute @workgroup_size(64)
+fn light_trace(@builtin(global_invocation_id) id: vec3u) {
+
+    let photons = photon_count();
+    if (id.x >= photons) {
+        return;
+    }
+
+    rng_state = pcg(id.x ^ pcg(params.sample_offset * 2654435769u + 977u));
+
+    // Choose a light: emitters holds each one's cumulative chance, its
+    // primitive (NONE for the sun), its chance and how far out the sun's
+    // light starts, then the sphere round the mirrors and glass, whose
+    // circle the sun's light comes through.
+    let count = arrayLength(&emitters) / 2u;
+    let xi = rand();
+    var k = 0u;
+    loop {
+        if (k + 1u >= count || emitters[k * 2u].x > xi) {
+            break;
+        }
+        k++;
+    }
+    let entry = emitters[k * 2u];
+    let chance = entry.z;
+    if (chance <= 0.0) {
+        return;
+    }
+    let prim_index = bitcast<u32>(entry.y);
+
+    var o: vec3f;
+    var d: vec3f;
+    var beta: vec3f;
+
+    if (prim_index == NONE) {
+        // The sun: through a circle facing it, as big as the scene.
+        let circle = emitters[k * 2u + 1u];
+        let f = frame(params.sun_dir);
+        let disk = concentric_disk() * circle.w;
+        o = circle.xyz + params.sun_dir * entry.w + f[0] * disk.x + f[1] * disk.y;
+        d = -sample_cone(params.sun_dir, params.sun_omc);
+        let irradiance = params.sun_radiance * (2.0 * PI * params.sun_omc);
+        beta = irradiance * (PI * circle.w * circle.w) / (chance * f32(photons));
+    }
+    else {
+        let prim = prims[prim_index];
+        let m = materials[prim.material];
+        var n: vec3f;
+        var area: f32;
+        var uv: vec2f;
+        if (prim.kind == QUAD) {
+            let a = rand();
+            let b = rand();
+            o = prim.p0.xyz + prim.p1.xyz * a + prim.p2.xyz * b;
+            let c = cross(prim.p1.xyz, prim.p2.xyz);
+            area = length(c);
+            n = c / area;
+            uv = vec2f(a, 1.0 - b);
+        }
+        else {
+            let z = 1.0 - 2.0 * rand();
+            let r = sqrt(max(0.0, 1.0 - z * z));
+            let phi = 2.0 * PI * rand();
+            n = vec3f(r * cos(phi), z, r * sin(phi));
+            o = prim.p0.xyz + n * prim.p0.w;
+            area = 4.0 * PI * prim.p0.w * prim.p0.w;
+            uv = sphere_uv(n, prim);
+        }
+        // Aim at the sphere round the mirrors and glass: light that misses
+        // it can't reach them first, so can't make a caustic. Lambertian
+        // light carries power in proportion to cos(θ), which the weight
+        // makes up for. From inside the sphere, any direction will do, so
+        // cosine-weighted ones, which carry equal power.
+        let aim = emitters[k * 2u + 1u];
+        let to = aim.xyz - o;
+        let d2 = dot(to, to);
+        if (d2 > aim.w * aim.w) {
+            let omc = sphere_omc(aim.w, d2);
+            d = sample_cone(to / sqrt(d2), omc);
+            let cos_out = dot(d, n);
+            if (cos_out <= 0.0) {
+                return;
+            }
+            beta = emitted(m, uv) * (cos_out * area * 2.0 * PI * omc) / (chance * f32(photons));
+        }
+        else {
+            d = cosine_hemisphere(n);
+            beta = emitted(m, uv) * (PI * area) / (chance * f32(photons));
+        }
+        o += n * (1e-4 * max(1.0, max(abs(o.x), max(abs(o.y), abs(o.z)))));
+    }
+
+    var wavelength = 0.0;
+    var bounces = 0u;
+    // What's left of beta after the bounces, from 1: Russian roulette goes
+    // by this, as beta is tiny, being shared among so many photons.
+    var carried = vec3f(1.0);
+
+    for (var depth = 0u; depth < params.max_bounces; depth++) {
+
+        let hit = trace(o, d, INF, false);
+        if (hit.prim == NONE) {
+            return;
+        }
+
+        let s = surface(o, d, hit);
+        let m = materials[s.material];
+        if (m.kind == LIGHT) {
+            return;
+        }
+
+        let base = albedo(m, s.p, s.uv);
+
+        if (!is_delta(m)) {
+            // Light straight from the lamp is the path tracer's; after
+            // mirrors or glass, it's a caustic.
+            if (bounces > 0u) {
+                splat(s, m, base, d, beta * carried);
+            }
+            return;
+        }
+
+        let bs = sample_bsdf(dispersed(m, &wavelength, &carried, rand()), base, s, -d);
+        if (!bs.ok) {
+            return;
+        }
+        carried *= bs.weight;
+        bounces++;
+        o = offset(s, bs.wi);
+        d = bs.wi;
+
+        if (!roulette(&carried, depth)) {
+            return;
+        }
+    }
+}
+
+// Adds each pixel's light from light tracing this frame to the average,
+// once for each of the frame's samples, and clears it for the next. Its
+// luminance squared goes in too, so the denoiser sees how much it varies.
+@compute @workgroup_size(8, 8)
+fn resolve_splats(@builtin(global_invocation_id) id: vec3u) {
+
+    if (id.x >= params.width || id.y >= params.height) {
+        return;
+    }
+
+    let index = id.y * params.width + id.x;
+    let fixed = vec3f(f32(atomicExchange(&splats[index * 4u], 0u)), f32(atomicExchange(&splats[index * 4u + 1u], 0u)), f32(atomicExchange(&splats[index * 4u + 2u], 0u)));
+    let light = fixed / SPLAT_SCALE;
+    let l = luminance(light);
+    accum[index] += vec4f(light, l * l) * f32(params.samples_per_frame);
 }
 
 fn finite(v: vec3f) -> bool {

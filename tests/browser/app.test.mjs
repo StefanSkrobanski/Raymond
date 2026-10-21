@@ -486,6 +486,32 @@ test("sampling a light through fog agrees with finding it by scattering", async 
     assert.ok(Math.abs(a / b - 1.0) < 0.03, `direct ${a}, bounced ${b}`);
 });
 
+for (const scene of ["causticLamp", "causticSun", "causticMirror"]) {
+
+    test(`light tracing's caustics agree with path tracing's, for ${scene}`, async () => {
+
+        // Path tracing alone finds caustics slowly; light tracing quickly,
+        // with the path tracer leaving those paths to it. The two must
+        // agree, over the floor and in the caustic.
+        const size = 32;
+        const traced = await trace(scene, { spp: 128, size, bounces: 8, caustics: true });
+        const alone = await trace(scene, { spp: 2048, size, bounces: 8, caustics: false });
+
+        const floor = interior(traced.hits, size, 0);
+        const brightness = (r, i) => mean(rgb(r.pixels, i));
+        const all = (r) => mean(floor.map((i) => brightness(r, i)));
+        assert.ok(floor.length > 200, `${floor.length} floor pixels`);
+        assert.ok(Math.abs(all(traced) / all(alone) - 1) < 0.04, `whole floor: light traced ${all(traced)}, path traced ${all(alone)}`);
+
+        // The caustic: the brightest tenth of the floor, as path tracing
+        // alone sees it.
+        const order = [...floor].sort((a, b) => brightness(alone, b) - brightness(alone, a));
+        const caustic = order.slice(0, Math.ceil(floor.length / 10));
+        const lit = (r) => mean(caustic.map((i) => brightness(r, i)));
+        assert.ok(Math.abs(lit(traced) / lit(alone) - 1) < 0.08, `caustic: light traced ${lit(traced)}, path traced ${lit(alone)}`);
+    });
+}
+
 // ---- The denoiser ----
 
 // The root mean square difference between two images' RGB.

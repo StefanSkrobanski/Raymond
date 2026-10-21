@@ -1,4 +1,9 @@
+import { Box } from "./Box.mjs";
+import { Mesh } from "./Mesh.mjs";
+import { Quad } from "./Quad.mjs";
+import { PRIMITIVE_KINDS } from "./Scene.mjs";
 import { DENOISE_SHADER, DISPLAY_SHADER, TRACE_SHADER } from "./shaders.mjs";
+import { Vec3 } from "./Vec3.mjs";
 /** @import { Camera } from "./Camera.mjs" */
 /** @import { Scene } from "./Scene.mjs" */
 
@@ -54,7 +59,8 @@ export class Renderer {
     #canvas;
     #format;
 
-    #trace_pipeline;
+    /** @type {{ trace: GPUComputePipeline, light: GPUComputePipeline, resolve: GPUComputePipeline }} */
+    #trace_pipelines;
     #display_pipeline;
     #denoise_pipelines;
     #params_buffer;
@@ -73,6 +79,22 @@ export class Renderer {
     /** @type {View} */
     #view = "color";
     #denoise = true;
+    #caustics = true;
+    // Whether light tracing ran last frame, and the lights it starts from.
+    #caustics_active = false;
+    /** @type {GPUBuffer | null} */
+    #emitters = null;
+    // From the uploaded scene, for light tracing: each light's primitive
+    // and power, and the sphere round every mirror and glass object (null
+    // for none: no caustics).
+    /** @type {{ prim: number, power: number }[]} */
+    #light_powers = [];
+    /** @type {{ centre: Vec3, radius: number, reach: number } | null} */
+    #delta_sphere = null;
+    /** @type {GPUBindGroup | null} */
+    #light_group = null;
+    /** @type {GPUBindGroup | null} */
+    #resolve_group = null;
 
     #samples = 0;
     #params = new ArrayBuffer(PARAMS_BYTES);
@@ -123,17 +145,17 @@ export class Renderer {
      * @param {HTMLCanvasElement | OffscreenCanvas} canvas
      * @param {GPUCanvasContext} context
      * @param {GPUTextureFormat} format
-     * @param {GPUComputePipeline} trace_pipeline
+     * @param {{ trace: GPUComputePipeline, light: GPUComputePipeline, resolve: GPUComputePipeline }} trace_pipelines
      * @param {GPURenderPipeline} display_pipeline
      * @param {{ prepare: GPUComputePipeline, atrous: GPUComputePipeline, compose: GPUComputePipeline }} denoise_pipelines
      */
-    constructor(device, canvas, context, format, trace_pipeline, display_pipeline, denoise_pipelines) {
+    constructor(device, canvas, context, format, trace_pipelines, display_pipeline, denoise_pipelines) {
 
         this.#device = device;
         this.#canvas = canvas;
         this.#context = context;
         this.#format = format;
-        this.#trace_pipeline = trace_pipeline;
+        this.#trace_pipelines = trace_pipelines;
         this.#display_pipeline = display_pipeline;
         this.#denoise_pipelines = denoise_pipelines;
 
@@ -199,13 +221,13 @@ export class Renderer {
         const format = gpu.getPreferredCanvasFormat();
         context.configure({ device, format, alphaMode: "opaque" });
 
-        const [trace_pipeline, display_pipeline, denoise_pipelines] = await Promise.all([
-            Renderer.#computePipeline(device, TRACE_SHADER),
+        const [trace_pipelines, display_pipeline, denoise_pipelines] = await Promise.all([
+            Renderer.#tracePipelines(device),
             Renderer.#renderPipeline(device, DISPLAY_SHADER, format),
             Renderer.#denoisePipelines(device),
         ]);
 
-        return new Renderer(device, canvas, context, format, trace_pipeline, display_pipeline, denoise_pipelines);
+        return new Renderer(device, canvas, context, format, trace_pipelines, display_pipeline, denoise_pipelines);
     }
 
     get device() {
@@ -302,6 +324,23 @@ export class Renderer {
         this.#denoise = value;
     }
 
+    /**
+     * Whether to trace light from the lamps and the sun as well, through
+     * mirrors and glass, so caustics (the light they focus onto surfaces)
+     * come out sharp in a fraction of the samples. It takes effect with a
+     * pinhole camera (aperture 0), in the color view, and in scenes without
+     * volumes, which have mirrors or glass for it to go through; otherwise
+     * path tracing finds caustics alone, slowly. Either way the image
+     * converges to the same thing.
+     */
+    get caustics() {
+        return this.#caustics;
+    }
+
+    set caustics(value) {
+        this.#caustics = value;
+    }
+
     /** Paths per pixel averaged so far. */
     get samples() {
         return this.#samples;
@@ -335,14 +374,30 @@ export class Renderer {
         if (!this.#accum || width != this.#width || height != this.#height)
             this.#resize(width, height);
 
+        const caustics = this.#caustics && camera.aperture == 0 && this.#view == "color" && this.#volume_count == 0 &&
+            this.#writeEmitters(scene);
+        if (caustics != this.#caustics_active) {
+            this.#caustics_active = caustics;
+            this.#samples = 0;
+        }
+
         this.#writeParams(scene, camera, width, height);
 
         const encoder = this.#device.createCommandEncoder();
 
         const compute = encoder.beginComputePass();
-        compute.setPipeline(this.#trace_pipeline);
+        compute.setPipeline(this.#trace_pipelines.trace);
         compute.setBindGroup(0, this.#trace_group);
         compute.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
+
+        if (caustics) {
+            compute.setPipeline(this.#trace_pipelines.light);
+            compute.setBindGroup(0, this.#light_group);
+            compute.dispatchWorkgroups(Math.ceil(Math.min(width * height * this.#samples_per_frame, 65535 * 64) / 64));
+            compute.setPipeline(this.#trace_pipelines.resolve);
+            compute.setBindGroup(0, this.#resolve_group);
+            compute.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
+        }
 
         if (this.#denoising()) {
             const { prepare, atrous, compose } = this.#denoise_pipelines;
@@ -461,6 +516,26 @@ export class Renderer {
 
         this.#light_count = lights.length;
         this.#volume_count = packed.volumes.length;
+
+        // Each light's power, for light tracing to choose among them by:
+        // its luminance times pi times its area.
+        const prim_floats = new Float32Array(packed.primitives);
+        const prim_uints = new Uint32Array(packed.primitives);
+        const mat_floats = new Float32Array(packed.materials);
+        this.#light_powers = lights.map((prim) => {
+            const b = prim * 16, m = prim_uints[b + 1] * 24;
+            const luminance = 0.2126 * mat_floats[m + 4] + 0.7152 * mat_floats[m + 5] + 0.0722 * mat_floats[m + 6];
+            const v = (/** @type {number} */ i) => new Vec3(prim_floats[b + i], prim_floats[b + i + 1], prim_floats[b + i + 2]);
+            const area = prim_uints[b] == PRIMITIVE_KINDS.quad ? v(8).cross(v(12)).length() : 4 * Math.PI * prim_floats[b + 7] ** 2;
+            return { prim, power: luminance * Math.PI * area };
+        });
+        this.#delta_sphere = deltaSphere(scene);
+        this.#emitters?.destroy();
+        this.#emitters = this.#device.createBuffer({
+            label: "emitters",
+            size: (lights.length + 1) * 32,
+            usage: BUFFER_STORAGE | BUFFER_COPY_DST,
+        });
         this.#textures?.destroy();
         this.#textures = this.#uploadTextures("textures", packed.textures, "rgba8unorm-srgb");
         this.#normal_maps?.destroy();
@@ -507,6 +582,54 @@ export class Renderer {
             { width, height, depthOrArrayLayers: 1 }));
 
         return texture;
+    }
+
+    // Writes the lights light tracing starts from, chosen by power: each as
+    // two vec4s, the cumulative chance, its primitive (NONE for the sun),
+    // its chance and how far out the sun's light starts; then the sphere
+    // round the mirrors and glass, which is all the sun's light must pass
+    // through to make a caustic.
+    // Returns false if there's nothing for light tracing to do.
+    /** @param {Scene} scene */
+    #writeEmitters(scene) {
+
+        const sphere = this.#delta_sphere;
+        const sky = scene.sky;
+        if (!sphere || !this.#emitters)
+            return false;
+
+        /** @type {{ prim: number, power: number }[]} */
+        const sources = [...this.#light_powers];
+        if (sky.sunStrength > 0) {
+            const omc = 2.0 * Math.sin(sky.sunSize / 2.0) ** 2;
+            const r = sky.sunRadiance;
+            const luminance = 0.2126 * r.x + 0.7152 * r.y + 0.0722 * r.z;
+            sources.push({ prim: 0xffffffff, power: luminance * 2 * Math.PI * omc * Math.PI * sphere.radius ** 2 });
+        }
+
+        const total = sources.reduce((sum, e) => sum + e.power, 0);
+        if (!(total > 0))
+            return false;
+
+        const data = new Float32Array(this.#emitters.size / 4);
+        const uints = new Uint32Array(data.buffer);
+        let running = 0;
+        for (let k = 0; k < data.length / 8; ++k) {
+            const source = sources[k];
+            if (!source) {
+                data[k * 8] = 2.0; // never reached
+                continue;
+            }
+            running += source.power / total;
+            data[k * 8] = k == sources.length - 1 ? 1.0 : running;
+            uints[k * 8 + 1] = source.prim;
+            data[k * 8 + 2] = source.power / total;
+            data[k * 8 + 3] = sphere.reach;
+            data.set([sphere.centre.x, sphere.centre.y, sphere.centre.z, sphere.radius], k * 8 + 4);
+        }
+
+        this.#device.queue.writeBuffer(this.#emitters, 0, data);
+        return true;
     }
 
     // Uploads the environment map as half floats, and its table for picking
@@ -570,7 +693,7 @@ export class Renderer {
         });
 
         this.#accum = pixels("accumulation");
-        this.#pixel_buffers = ["guide albedo", "guide normal", "light a", "light b", "denoised"].map(pixels);
+        this.#pixel_buffers = ["guide albedo", "guide normal", "light a", "light b", "denoised", "splats"].map(pixels);
 
         this.#width = width;
         this.#height = height;
@@ -582,10 +705,36 @@ export class Renderer {
 
         const accum = /** @type {GPUBuffer} */ (this.#accum);
         const [primitives, nodes, materials, attributes, lights] = this.#scene_buffers;
-        const [guide_albedo, guide_normal, light_a, light_b, denoised] = this.#pixel_buffers;
+        const [guide_albedo, guide_normal, light_a, light_b, denoised, splats] = this.#pixel_buffers;
+        const emitters = /** @type {GPUBuffer} */ (this.#emitters);
+
+        this.#light_group = this.#device.createBindGroup({
+            layout: this.#trace_pipelines.light.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this.#params_buffer } },
+                { binding: 1, resource: { buffer: primitives } },
+                { binding: 2, resource: { buffer: nodes } },
+                { binding: 3, resource: { buffer: materials } },
+                { binding: 4, resource: { buffer: attributes } },
+                { binding: 9, resource: /** @type {GPUTexture} */ (this.#textures).createView({ dimension: "2d-array" }) },
+                { binding: 10, resource: this.#sampler },
+                { binding: 11, resource: /** @type {GPUTexture} */ (this.#normal_maps).createView({ dimension: "2d-array" }) },
+                { binding: 15, resource: { buffer: splats } },
+                { binding: 16, resource: { buffer: emitters } },
+            ],
+        });
+
+        this.#resolve_group = this.#device.createBindGroup({
+            layout: this.#trace_pipelines.resolve.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this.#params_buffer } },
+                { binding: 6, resource: { buffer: accum } },
+                { binding: 15, resource: { buffer: splats } },
+            ],
+        });
 
         this.#trace_group = this.#device.createBindGroup({
-            layout: this.#trace_pipeline.getBindGroupLayout(0),
+            layout: this.#trace_pipelines.trace.getBindGroupLayout(0),
             entries: [
                 { binding: 0, resource: { buffer: this.#params_buffer } },
                 { binding: 1, resource: { buffer: primitives } },
@@ -696,6 +845,7 @@ export class Renderer {
         u[44] = this.#samples + this.#samples_per_frame;
         f[45] = this.#exposure;
         u[46] = this.#denoising() ? 1 : 0;
+        u[47] = this.#caustics_active ? 1 : 0;
 
         this.#device.queue.writeBuffer(this.#params_buffer, 0, this.#params);
     }
@@ -704,15 +854,38 @@ export class Renderer {
      * @param {GPUDevice} device
      * @param {string} code
      */
-    static async #computePipeline(device, code) {
+    // The path tracer, and light tracing's two passes, which have explicit
+    // layouts since each uses only some of the module's bindings.
+    /** @param {GPUDevice} device */
+    static async #tracePipelines(device) {
 
-        const module = await Renderer.#shaderModule(device, code, "trace");
+        const module = await Renderer.#shaderModule(device, TRACE_SHADER, "trace");
 
-        return device.createComputePipelineAsync({
-            label: "trace",
-            layout: "auto",
-            compute: { module, entryPoint: "main" },
+        /** @type {(binding: number, layout: Omit<GPUBindGroupLayoutEntry, "binding" | "visibility">) => GPUBindGroupLayoutEntry} */
+        const entry = (binding, layout) => ({ binding, visibility: COMPUTE_STAGE, ...layout });
+        const uniform = (/** @type {number} */ b) => entry(b, { buffer: { type: "uniform" } });
+        const read = (/** @type {number} */ b) => entry(b, { buffer: { type: STORAGE_READ } });
+        const write = (/** @type {number} */ b) => entry(b, { buffer: { type: "storage" } });
+        const array = (/** @type {number} */ b) => entry(b, { texture: { sampleType: "float", viewDimension: "2d-array" } });
+
+        /** @type {(entryPoint: string, entries: GPUBindGroupLayoutEntry[]) => Promise<GPUComputePipeline>} */
+        const pipeline = (entryPoint, entries) => device.createComputePipelineAsync({
+            label: entryPoint,
+            layout: device.createPipelineLayout({ bindGroupLayouts: [device.createBindGroupLayout({ entries })] }),
+            compute: { module, entryPoint },
         });
+
+        const [trace, light, resolve] = await Promise.all([
+            device.createComputePipelineAsync({ label: "trace", layout: "auto", compute: { module, entryPoint: "main" } }),
+            pipeline("light_trace", [
+                uniform(0), read(1), read(2), read(3), read(4),
+                array(9), entry(10, { sampler: { type: "filtering" } }), array(11),
+                write(15), read(16),
+            ]),
+            pipeline("resolve_splats", [uniform(0), write(6), write(15)]),
+        ]);
+
+        return { trace, light, resolve };
     }
 
     /**
@@ -803,4 +976,49 @@ function toHalf(x) {
         e++;
     }
     return (e << 10) | mantissa;
+}
+
+// The sphere round every mirror and glass object in the scene, or null if
+// there are none.
+/** @param {Scene} scene */
+function deltaSphere(scene) {
+
+    /** @type {Vec3[]} */
+    const points = [];
+    for (const object of scene.objects) {
+        const m = object.material;
+        if (!(m.type == "glass" || (m.type == "metal" && m.roughness < 0.01)))
+            continue;
+        if (object instanceof Mesh)
+            points.push(...object.positions);
+        else if (object instanceof Box)
+            points.push(...object.corners());
+        else if (object instanceof Quad)
+            points.push(object.corner, object.corner.add(object.u), object.corner.add(object.v), object.corner.add(object.u).add(object.v));
+        else {
+            const r = new Vec3(object.radius, object.radius, object.radius);
+            points.push(object.center.subtract(r), object.center.add(r));
+        }
+    }
+
+    if (points.length == 0)
+        return null;
+
+    const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+    for (const p of points) {
+        [p.x, p.y, p.z].forEach((c, a) => {
+            min[a] = Math.min(min[a], c);
+            max[a] = Math.max(max[a], c);
+        });
+    }
+    const lo = new Vec3(min[0], min[1], min[2]), hi = new Vec3(max[0], max[1], max[2]);
+    const centre = lo.add(hi).scale(0.5);
+
+    // Far enough out along any direction to be outside the whole scene, so
+    // sunlight starting there passes everything that might shade the glass.
+    const bounds = scene.bounds();
+    const reach = bounds ?
+        centre.subtract(bounds.min.add(bounds.max).scale(0.5)).length() + bounds.max.subtract(bounds.min).length() / 2 + 1 : 1;
+
+    return { centre, radius: Math.max(hi.subtract(lo).length() / 2, 1e-3) * 1.001, reach };
 }

@@ -27,6 +27,8 @@ renderer.scene = scene;
 renderer.camera = camera;
 renderer.maxBounces = 12;
 renderer.denoise = true;
+renderer.caustics = false;
+const tracingLight: boolean = renderer.caustics;
 
 const view: View = "normal";
 renderer.view = view;
@@ -88,4 +90,4 @@ const density: number = studioLights.pdf(new Vec3(0, 1, 0));
 // @ts-expect-error: an environment is an EnvironmentMap, not a Texture
 Sky.environment(checks);
 
-export { pixels, denoised, distance, stick, loaded, uv, redder, glows, photographed, fromFile, radiance, density };
+export { pixels, denoised, distance, stick, loaded, uv, redder, glows, photographed, fromFile, radiance, density, tracingLight };
