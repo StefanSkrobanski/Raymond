@@ -27,6 +27,7 @@ import { magnifyingGlass } from "./scenes/magnifier.mjs";
 import { materialChart } from "./scenes/materials.mjs";
 import { mengerScene } from "./scenes/menger.mjs";
 import { hallOfMirrors } from "./scenes/mirrors.mjs";
+import { wavyMirror } from "./scenes/wavymirror.mjs";
 import { neonNight } from "./scenes/neon.mjs";
 import { pendulumWave } from "./scenes/pendulum.mjs";
 import { swimmingPool } from "./scenes/pool.mjs";
@@ -70,6 +71,7 @@ export const SCENES = [
     { id: "pool", name: "Swimming pool", category: "Light and glass", build: swimmingPool },
     { id: "gems", name: "Gems", category: "Light and glass", build: gems },
     { id: "mirrors", name: "Hall of mirrors", category: "Light and glass", build: hallOfMirrors },
+    { id: "wavy-mirror", name: "Funhouse mirror", category: "Light and glass", build: wavyMirror },
     { id: "mirror-ball", name: "Inside a mirror ball", category: "Light and glass", build: mirrorBall },
     { id: "sunbeams", name: "Sunbeams", category: "Light and glass", build: sunbeams },
     { id: "neon", name: "Neon", category: "Light and glass", build: neonNight },

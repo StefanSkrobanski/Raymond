@@ -19,6 +19,10 @@ const settings = loadSettings();
 // mountain.
 const APERTURE_SCALE = 0.04;
 
+// Tapping a surface orbits round it and moves this fraction of the way
+// from it to the camera, so a few taps cross a room.
+const TAP_APPROACH = 0.5;
+
 // The fast preview while the camera moves: how long a frame should take,
 // the most bounces, the range of its resolution (a fraction of the full
 // one, each way), and how long after the last move to go back to full
@@ -48,6 +52,11 @@ renderer.device.lost.then((info) => {
 const camera = new Camera();
 const controls = new OrbitControls(camera, canvas);
 renderer.camera = camera;
+
+// Dragging, pinching and the wheel stop the camera at surfaces, so it
+// can't go through walls (going home, or flying to a tapped point, can).
+controls.collide = (origin, direction, distance) =>
+    renderer.scene?.raycast(origin, direction, distance)?.distance ?? Infinity;
 
 let playing = true;
 let demo = SCENES[0];
@@ -355,7 +364,8 @@ controls.addEventListener("change", () => {
     invalidate();
 });
 
-// Tapping the image focuses the lens on whatever is there.
+// Tapping the image makes what's there the point the camera orbits round,
+// and moves halfway towards it. The lens focuses there too.
 controls.addEventListener("tap", (e) => {
 
     const { x, y } = /** @type {CustomEvent<{ x: number, y: number }>} */ (e).detail;
@@ -372,13 +382,14 @@ controls.addEventListener("tap", (e) => {
     if (!hit)
         return;
 
-    // The focus distance is measured along the view direction, to a plane.
-    camera.focusDistance = hit.distance * ray.direction.dot(camera.basis().forward);
+    const view = OrbitControls.viewFrom(camera.position, hit.point);
+    controls.animateTo({ ...view, radius: view.radius * TAP_APPROACH }, { duration: 600 });
+
+    // Looking straight at the point, the focus distance is the radius.
+    camera.focusDistance = view.radius * TAP_APPROACH;
     applySettings();
 
-    toast(aperture > 0 ?
-        `Focused at ${camera.focusDistance.toFixed(2)}` :
-        `Focus set at ${camera.focusDistance.toFixed(2)}: raise the aperture to blur the rest`);
+    toast("Orbiting round the point you tapped: double-tap to go back");
 });
 
 $("play").addEventListener("click", () => {

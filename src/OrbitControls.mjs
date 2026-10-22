@@ -27,6 +27,9 @@ import { Vec3 } from "./Vec3.mjs";
  * CSS pixels from the element's top left) for a tap or click that isn't a
  * drag. Adapted from Styx's CameraTool.
  *
+ * Give it a collide function and dragging, pinching and the wheel can't
+ * take the camera through walls: it stops in front of them.
+ *
  * The home view is where the camera starts. Give the canvas the CSS
  * touch-action: none, so touch gestures don't scroll or zoom the page.
  */
@@ -70,8 +73,11 @@ export class OrbitControls extends EventTarget {
     // State of the momentum or reset animation, if one is running.
     #animation_frame = 0;
     #last_frame_time = 0.0;
-    /** @type {{ start_time: number, from: OrbitView, to: OrbitView } | null} */
+    /** @type {{ start_time: number, duration: number, from: OrbitView, to: OrbitView } | null} */
     #reset_animation = null;
+
+    /** @type {((origin: Vec3, direction: Vec3, distance: number) => number) | null} */
+    #collide = null;
 
     /**
      * @param {Camera} camera the camera to move
@@ -123,6 +129,22 @@ export class OrbitControls extends EventTarget {
     set radius(value) {
         this.#radius = value;
         this.#updateCamera();
+    }
+
+    /**
+     * Finds what's in the way of the camera as it moves: given where it is,
+     * which way it's going (unit length) and how far, it returns the
+     * distance to the first surface on the way, or Infinity for none. The camera then stops just short of that surface. Animations
+     * (going home, animateTo()) aren't stopped. Null (the default) lets the
+     * camera go anywhere.
+     * @type {((origin: Vec3, direction: Vec3, distance: number) => number) | null}
+     */
+    get collide() {
+        return this.#collide;
+    }
+
+    set collide(value) {
+        this.#collide = value;
     }
 
     /** The current view. */
@@ -180,28 +202,30 @@ export class OrbitControls extends EventTarget {
 
     /** Animates back to the home view. */
     reset() {
+        this.animateTo(this.#home);
+    }
 
-        const home = this.#home;
+    /**
+     * Animates to a view; anything left out stays as it is.
+     * @param {Partial<OrbitView>} view
+     * @param {{ duration?: number }} [options] how long it takes, in
+     *     milliseconds
+     */
+    animateTo(view, { duration = 400.0 } = {}) {
+
+        const to = { ...this.view, ...view };
 
         // Turn the shortest way round rather than unwinding full turns.
-        const turns = Math.round((this.#azimuth - home.azimuth) / (2.0 * Math.PI));
+        const turns = Math.round((this.#azimuth - to.azimuth) / (2.0 * Math.PI));
 
+        this.#stopAnimation();
         this.#velocity = new Vec2(0.0, 0.0);
 
         this.#reset_animation = {
             start_time: performance.now(),
-            from: {
-                orbitPoint: this.#orbit_point,
-                radius: this.#radius,
-                inclination: this.#inclination,
-                azimuth: this.#azimuth,
-            },
-            to: {
-                orbitPoint: home.orbitPoint,
-                radius: home.radius,
-                inclination: home.inclination,
-                azimuth: home.azimuth + turns * 2.0 * Math.PI,
-            },
+            duration,
+            from: this.view,
+            to: { ...to, azimuth: to.azimuth + turns * 2.0 * Math.PI },
         };
 
         this.#startAnimation();
@@ -301,7 +325,7 @@ export class OrbitControls extends EventTarget {
             this.#pinch_centre = centre;
         }
 
-        this.#updateCamera();
+        this.#updateCamera({ sweep: true });
     }
 
     /** @param {PointerEvent} e */
@@ -376,7 +400,7 @@ export class OrbitControls extends EventTarget {
             this.#radius *= 0.9;
         }
 
-        this.#updateCamera();
+        this.#updateCamera({ sweep: true });
     }
 
     /**
@@ -507,9 +531,9 @@ export class OrbitControls extends EventTarget {
 
         if (this.#reset_animation !== null) {
 
-            const { start_time, from, to } = this.#reset_animation;
+            const { start_time, duration, from, to } = this.#reset_animation;
 
-            const t = Math.min((time - start_time) / 400.0, 1.0);
+            const t = Math.min((time - start_time) / duration, 1.0);
             const ease = 1.0 - Math.pow(1.0 - t, 3.0);
             const lerp = (/** @type {number} */ a, /** @type {number} */ b) => a + (b - a) * ease;
 
@@ -542,30 +566,62 @@ export class OrbitControls extends EventTarget {
             running = Math.hypot(this.#velocity.x, this.#velocity.y) > 0.00002;
         }
 
-        this.#updateCamera();
+        // Momentum can run into a wall; going home can't.
+        if (this.#updateCamera({ sweep: this.#reset_animation === null }))
+            running = false;
 
         if (running) {
             this.#startAnimation();
         }
     }
 
-    #updateCamera() {
+    // Puts the camera where the view says. With sweep, a camera that would
+    // pass through a surface on the way stops in front of it instead, and
+    // the view is changed to match; returns whether it stopped.
+    #updateCamera({ sweep = false } = {}) {
 
         const cos_inc = Math.cos(this.#inclination);
         const sin_inc = Math.sin(this.#inclination);
         const cos_az = Math.cos(this.#azimuth);
         const sin_az = Math.sin(this.#azimuth);
 
-        const x = this.#radius * sin_inc * cos_az;
-        const y = this.#radius * cos_inc;
-        const z = this.#radius * sin_inc * sin_az;
-
         const look_at = this.#orbit_point;
+        let position = look_at.add(new Vec3(sin_inc * cos_az, cos_inc, sin_inc * sin_az).scale(this.#radius));
+        let stopped = false;
 
-        this.#camera.position = new Vec3(look_at.x + x, look_at.y + y, look_at.z + z);
+        if (sweep && this.#collide) {
+            const from = this.#camera.position;
+            const move = position.subtract(from);
+            const length = move.length();
+            if (length > 0.0) {
+                const direction = move.scale(1.0 / length);
+                const blocked = this.#collide(from, direction, length);
+                // Keep a little way off the surface, so the next move
+                // doesn't start on it.
+                const gap = 0.02 * this.#radius;
+                if (blocked < length + gap) {
+                    position = from.add(direction.scale(Math.max(blocked - gap, 0.0)));
+                    const view = OrbitControls.viewFrom(position, look_at);
+                    this.#radius = view.radius;
+                    this.#inclination = Math.min(Math.max(view.inclination, 0.00001), Math.PI - 0.00001);
+                    this.#azimuth = this.#azimuth + remainder(view.azimuth - this.#azimuth);
+                    this.#velocity = new Vec2(0.0, 0.0);
+                    stopped = true;
+                }
+            }
+        }
+
+        this.#camera.position = position;
         this.#camera.target = look_at;
         this.#camera.up = new Vec3(0.0, 1.0, 0.0);
 
         this.dispatchEvent(new Event("change"));
+        return stopped;
     }
+}
+
+// An angle brought within half a turn of zero.
+/** @param {number} angle */
+function remainder(angle) {
+    return angle - 2.0 * Math.PI * Math.round(angle / (2.0 * Math.PI));
 }
