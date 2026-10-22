@@ -17,7 +17,7 @@ A progressive path tracer for WebGPU, in plain JavaScript ES modules with no dep
 - **A thin-lens camera** with depth of field, and **inspection views** of albedo, normals and depth.
 - **A fast preview while you move the camera** in the demo: fewer bounces at a lower resolution, which adapts to keep about 30 frames a second on whatever device it's on, then the full image the moment you stop.
 - **Orbit controls** for mouse, touch and pen, adapted from [Styx](https://github.com/StefanSkrobanski/Styx), whose maths library Raymond also uses.
-- **A CPU raycast** with exactly the shader's tests, on the same packed data, for picking (tap to orbit round a point and focus there), for keeping the camera out of walls, and for testing the GPU.
+- **A CPU raycast** with exactly the shader's tests, on the same packed data, for picking (tap to orbit round a point and focus there) and for testing the GPU.
 
 The demo app has 50 scenes in five groups:
 
