@@ -36,6 +36,15 @@ const NONE = 0xffffffffu;
 const T_MIN = 1e-4;
 const INF = 1e30;
 
+// Whether the scene has volumes, textures (of any kind), an environment
+// map or glass that splits colours. Renderer turns off the ones a scene
+// doesn't use, so the compiler leaves their code out: even code that never
+// runs slows the rest down on some GPUs.
+override VOLUMES = true;
+override TEXTURES = true;
+override ENVIRONMENT = true;
+override DISPERSION = true;
+
 const SPHERE = 0u;
 const QUAD = 1u;
 const BOX = 2u;
@@ -85,8 +94,8 @@ struct Material {
 @group(0) @binding(9) var textures: texture_2d_array<f32>;
 @group(0) @binding(10) var texture_sampler: sampler;
 // For light tracing: the light it adds to each pixel this frame, in fixed
-// point (4 per pixel), and the lights it starts from, two vec4s each (see
-// Renderer.#writeEmitters).
+// point (4 per pixel), and the lights it starts from and the spheres it
+// aims at (see Renderer.#writeEmitters).
 @group(0) @binding(15) var<storage, read_write> splats: array<atomic<u32>>;
 @group(0) @binding(16) var<storage, read> emitters: array<vec4f>;
 // For photon mapping: a hash table of grid cells, each the head of a list
@@ -465,7 +474,7 @@ fn surface(o: vec3f, d: vec3f, hit: Hit) -> Surface {
     }
 
     let m = materials[p.material];
-    if (m.normal_map != NONE) {
+    if (TEXTURES && m.normal_map != NONE) {
         let t = textureSampleLevel(normal_maps, texture_sampler, uv * m.texture_scale, m.normal_map, 0.0).xyz;
         ns = bump(ns, ng, tangent, up, t, m.normal_scale);
     }
@@ -579,7 +588,7 @@ fn sample_env() -> vec3f {
 }
 
 fn sky(d: vec3f) -> vec3f {
-    if (params.env_strength > 0.0) {
+    if (ENVIRONMENT && params.env_strength > 0.0) {
         return env_radiance(d);
     }
     if (d.y >= 0.0) {
@@ -603,7 +612,7 @@ fn albedo(m: Material, p: vec3f, uv: vec2f) -> vec3f {
         let odd = (i32(cell.x) + i32(cell.y) + i32(cell.z)) & 1;
         c = select(m.color, m.checker, odd != 0);
     }
-    if (m.texture != NONE) {
+    if (TEXTURES && m.texture != NONE) {
         c *= textureSampleLevel(textures, texture_sampler, uv * m.texture_scale, m.texture, 0.0).rgb;
     }
     return c;
@@ -611,7 +620,7 @@ fn albedo(m: Material, p: vec3f, uv: vec2f) -> vec3f {
 
 // What a material gives off at texture coordinate uv.
 fn emitted(m: Material, uv: vec2f) -> vec3f {
-    if (m.emission_texture == NONE) {
+    if (!TEXTURES || m.emission_texture == NONE) {
         return m.emission;
     }
     return m.emission * textureSampleLevel(textures, texture_sampler, uv * m.texture_scale, m.emission_texture, 0.0).rgb;
@@ -780,7 +789,7 @@ fn sample_bsdf(m: Material, base: vec3f, s: Surface, wo: vec3f) -> BsdfSample {
 // The lights next event estimation chooses among: the lights, then the
 // sun, then the environment.
 fn light_choices() -> u32 {
-    return params.light_count + select(0u, 1u, params.sun_on != 0u) + select(0u, 1u, params.env_strength > 0.0);
+    return params.light_count + select(0u, 1u, params.sun_on != 0u) + select(0u, 1u, ENVIRONMENT && params.env_strength > 0.0);
 }
 
 fn sun_choice() -> u32 {
@@ -788,7 +797,7 @@ fn sun_choice() -> u32 {
 }
 
 fn env_choice() -> u32 {
-    return select(NONE, params.light_count + select(0u, 1u, params.sun_on != 0u), params.env_strength > 0.0);
+    return select(NONE, params.light_count + select(0u, 1u, params.sun_on != 0u), ENVIRONMENT && params.env_strength > 0.0);
 }
 
 // 1 - cos of the half-angle a sphere covers from a point at squared
@@ -812,7 +821,7 @@ fn sample_light(p: vec3f) -> LightSample {
     let pick = min(u32(rand() * f32(choices)), choices - 1u);
     let chance = 1.0 / f32(choices);
 
-    if (pick == env_choice()) {
+    if (ENVIRONMENT && pick == env_choice()) {
         let wi = sample_env();
         let pdf = env_pdf(wi);
         if (pdf <= 0.0) {
@@ -934,6 +943,9 @@ struct Scatter {
 fn scatter_in_volumes(o: vec3f, d: vec3f, t_max: f32) -> Scatter {
 
     var s = Scatter(t_max, NONE);
+    if (!VOLUMES) {
+        return s;
+    }
 
     for (var k = 0u; k < params.volume_count; k++) {
         let i = volume(k);
@@ -954,6 +966,9 @@ fn scatter_in_volumes(o: vec3f, d: vec3f, t_max: f32) -> Scatter {
 // direction d, from o to dist.
 fn transmittance(o: vec3f, d: vec3f, dist: f32) -> f32 {
 
+    if (!VOLUMES) {
+        return 1.0;
+    }
     var depth = 0.0;
 
     for (var k = 0u; k < params.volume_count; k++) {
@@ -1072,53 +1087,55 @@ fn radiance(px: vec2f) -> vec3f {
 
         let hit = trace(o, d, INF, false);
 
-        // A particle in a volume, before the surface (or the sky)?
-        let sc = scatter_in_volumes(o, d, hit.t);
-        if (sc.volume != NONE) {
+        if (VOLUMES) {
+            // A particle in a volume, before the surface (or the sky)?
+            let sc = scatter_in_volumes(o, d, hit.t);
+            if (sc.volume != NONE) {
 
-            let vm = materials[prims[sc.volume].material];
-            let p = o + d * sc.t;
-            travelled += sc.t;
+                let vm = materials[prims[sc.volume].material];
+                let p = o + d * sc.t;
+                travelled += sc.t;
 
-            if (!guided) {
-                guided = true;
-                g_albedo = throughput * vm.color;
-                g_normal = vec4f(-d, travelled);
-            }
+                if (!guided) {
+                    guided = true;
+                    g_albedo = throughput * vm.color;
+                    g_normal = vec4f(-d, travelled);
+                }
 
-            if (depth == params.max_bounces) {
-                break;
-            }
+                if (depth == params.max_bounces) {
+                    break;
+                }
 
-            throughput *= vm.color;
+                throughput *= vm.color;
 
-            // Next event estimation, through the volumes on the way.
-            if (choices > 0u) {
-                let ls = sample_light(p);
-                if (ls.pdf > 0.0) {
-                    let phase = henyey_greenstein(dot(d, ls.wi), vm.anisotropy);
-                    let reach = ls.dist * (1.0 - 1e-3);
-                    if (!occluded(p, ls.wi, reach)) {
-                        result += throughput * ls.radiance * (phase * transmittance(p, ls.wi, reach) * power_heuristic(ls.pdf, phase) / ls.pdf);
+                // Next event estimation, through the volumes on the way.
+                if (choices > 0u) {
+                    let ls = sample_light(p);
+                    if (ls.pdf > 0.0) {
+                        let phase = henyey_greenstein(dot(d, ls.wi), vm.anisotropy);
+                        let reach = ls.dist * (1.0 - 1e-3);
+                        if (!occluded(p, ls.wi, reach)) {
+                            result += throughput * ls.radiance * (phase * transmittance(p, ls.wi, reach) * power_heuristic(ls.pdf, phase) / ls.pdf);
+                        }
                     }
                 }
+
+                // The phase function is sampled exactly, so its weight is 1.
+                let wi = sample_henyey_greenstein(d, vm.anisotropy);
+                last_pdf = henyey_greenstein(dot(d, wi), vm.anisotropy);
+                last_delta = false;
+                last_p = p;
+                o = p;
+                d = wi;
+
+                caustic = false;
+                diffuse_seen = true;
+
+                if (!roulette(&throughput, depth)) {
+                    break;
+                }
+                continue;
             }
-
-            // The phase function is sampled exactly, so its weight is 1.
-            let wi = sample_henyey_greenstein(d, vm.anisotropy);
-            last_pdf = henyey_greenstein(dot(d, wi), vm.anisotropy);
-            last_delta = false;
-            last_p = p;
-            o = p;
-            d = wi;
-
-            caustic = false;
-            diffuse_seen = true;
-
-            if (!roulette(&throughput, depth)) {
-                break;
-            }
-            continue;
         }
 
         if (hit.prim == NONE) {
@@ -1128,7 +1145,7 @@ fn radiance(px: vec2f) -> vec3f {
             // An environment is sampled directly too, so weigh it against
             // that; the gradient isn't.
             var sky_weight = 1.0;
-            if (params.env_strength > 0.0 && !last_delta) {
+            if (ENVIRONMENT && params.env_strength > 0.0 && !last_delta) {
                 sky_weight = power_heuristic(last_pdf, env_pdf(d) / f32(choices));
             }
             result += throughput * sky(d) * sky_weight;
@@ -1270,7 +1287,7 @@ fn inspect(px: vec2f) -> vec3f {
 // its index of refraction at that wavelength (Cauchy's equation).
 fn dispersed(m: Material, wavelength: ptr<function, f32>, throughput: ptr<function, vec3f>, u: f32) -> Material {
     var sm = m;
-    if (m.kind == GLASS && m.dispersion > 0.0) {
+    if (DISPERSION && m.kind == GLASS && m.dispersion > 0.0) {
         if (*wavelength == 0.0) {
             *wavelength = 380.0 + 340.0 * u;
             *throughput *= wavelength_rgb(*wavelength);
@@ -1397,7 +1414,7 @@ fn gather(s: Surface, m: Material, base: vec3f, wo: vec3f) -> vec3f {
     let cell_size = params.photon_cell;
     let here = s.p / cell_size;
     let cell = vec3i(floor(here));
-    // The cells are twice the starting radius, so the photons within it
+    // The cells are twice the radius, so the photons within it
     // are in this one or the neighbours on the nearer side each way.
     let side = vec3i(select(vec3i(-1), vec3i(1), fract(here) >= vec3f(0.5)));
 
@@ -1496,39 +1513,61 @@ fn light_trace(@builtin(global_invocation_id) id: vec3u) {
 
     rng_state = pcg(id.x ^ pcg(params.sample_offset * 2654435769u + 977u));
 
-    // Choose a light: emitters holds each one's cumulative chance, its
-    // primitive (NONE for the sun), its chance and how far out the sun's
-    // light starts, then the sphere round the mirrors and glass, whose
-    // circle the sun's light comes through.
-    let count = arrayLength(&emitters) / 2u;
+    // Choose a light: after a header, emitters holds each one's
+    // cumulative chance, its primitive (NONE for the sun) and its chance,
+    // then the spheres round the mirrors and glass to aim at.
+    let header = emitters[0];
+    let sources = bitcast<u32>(header.x);
+    let targets = bitcast<u32>(header.y);
     let xi = rand();
     var k = 0u;
     loop {
-        if (k + 1u >= count || emitters[k * 2u].x > xi) {
+        if (k + 1u >= sources || emitters[1u + k].x > xi) {
             break;
         }
         k++;
     }
-    let entry = emitters[k * 2u];
+    let entry = emitters[1u + k];
     let chance = entry.z;
     if (chance <= 0.0) {
         return;
     }
     let prim_index = bitcast<u32>(entry.y);
+    let first_target = 1u + sources;
 
     var o: vec3f;
     var d: vec3f;
     var beta: vec3f;
 
     if (prim_index == NONE) {
-        // The sun: through a circle facing it, as big as the scene.
-        let circle = emitters[k * 2u + 1u];
-        let f = frame(params.sun_dir);
-        let disk = concentric_disk() * circle.w;
-        o = circle.xyz + params.sun_dir * entry.w + f[0] * disk.x + f[1] * disk.y;
+        // The sun: from a direction within its disc, through a target's
+        // circle facing that way, chosen by area, starting outside the
+        // whole scene. Where circles overlap, light could have come
+        // through any of them, so its weight is shared.
         d = -sample_cone(params.sun_dir, params.sun_omc);
+        var pick = rand() * header.w / PI;
+        var j = 0u;
+        loop {
+            let r = emitters[first_target + j].w;
+            if (j + 1u >= targets || pick < r * r) {
+                break;
+            }
+            pick -= r * r;
+            j++;
+        }
+        let circle = emitters[first_target + j];
+        let f = frame(d);
+        let disk = concentric_disk() * circle.w;
+        o = circle.xyz - d * header.z + f[0] * disk.x + f[1] * disk.y;
+        var through = 1.0;
+        for (var i = 0u; i < targets; i++) {
+            let c = emitters[first_target + i];
+            let q = o - c.xyz;
+            let across = q - d * dot(q, d);
+            through += select(0.0, 1.0, i != j && dot(across, across) < c.w * c.w);
+        }
         let irradiance = params.sun_radiance * (2.0 * PI * params.sun_omc);
-        beta = irradiance * (PI * circle.w * circle.w) / (chance * f32(photons));
+        beta = irradiance * header.w / (through * chance * f32(photons));
     }
     else {
         let prim = prims[prim_index];
@@ -1554,22 +1593,48 @@ fn light_trace(@builtin(global_invocation_id) id: vec3u) {
             area = 4.0 * PI * prim.p0.w * prim.p0.w;
             uv = sphere_uv(n, prim);
         }
-        // Aim at the sphere round the mirrors and glass: light that misses
-        // it can't reach them first, so can't make a caustic. Lambertian
-        // light carries power in proportion to cos(θ), which the weight
-        // makes up for. From inside the sphere, any direction will do, so
-        // cosine-weighted ones, which carry equal power.
-        let aim = emitters[k * 2u + 1u];
-        let to = aim.xyz - o;
-        let d2 = dot(to, to);
-        if (d2 > aim.w * aim.w) {
-            let omc = sphere_omc(aim.w, d2);
-            d = sample_cone(to / sqrt(d2), omc);
+        // Aim at a sphere round some of the mirrors and glass, chosen by
+        // the solid angle it covers: light that misses them all can't
+        // reach them first, so can't make a caustic. The chance of a
+        // direction is shared among every sphere's cone it's in.
+        // Lambertian light carries power in proportion to cos(θ), which
+        // the weight makes up for. From inside a sphere, any direction
+        // will do, so cosine-weighted ones, which carry equal power.
+        var cones = 0.0;
+        var inside = false;
+        for (var i = 0u; i < targets; i++) {
+            let aim = emitters[first_target + i];
+            let to = aim.xyz - o;
+            let d2 = dot(to, to);
+            inside = inside || d2 <= aim.w * aim.w;
+            cones += sphere_omc(aim.w, max(d2, aim.w * aim.w));
+        }
+        if (!inside) {
+            var pick = rand() * cones;
+            var j = 0u;
+            loop {
+                let aim = emitters[first_target + j];
+                let to = aim.xyz - o;
+                let omc = sphere_omc(aim.w, dot(to, to));
+                if (j + 1u >= targets || pick < omc) {
+                    d = sample_cone(to / length(to), omc);
+                    break;
+                }
+                pick -= omc;
+                j++;
+            }
+            var within = 1.0;
+            for (var i = 0u; i < targets; i++) {
+                let aim = emitters[first_target + i];
+                let to = aim.xyz - o;
+                let omc = sphere_omc(aim.w, dot(to, to));
+                within += select(0.0, 1.0, i != j && 1.0 - dot(d, to / length(to)) <= omc);
+            }
             let cos_out = dot(d, n);
             if (cos_out <= 0.0) {
                 return;
             }
-            beta = emitted(m, uv) * (cos_out * area * 2.0 * PI * omc) / (chance * f32(photons));
+            beta = emitted(m, uv) * (cos_out * area * 2.0 * PI * cones) / (within * chance * f32(photons));
         }
         else {
             d = cosine_hemisphere(n);

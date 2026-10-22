@@ -491,16 +491,18 @@ test("sampling a light through fog agrees with finding it by scattering", async 
     assert.ok(Math.abs(a / b - 1.0) < 0.03, `direct ${a}, bounced ${b}`);
 });
 
-for (const scene of ["causticLamp", "causticSun", "causticMirror"]) {
+for (const scene of ["causticLamp", "causticSun", "causticMirror", "causticLampMany", "causticSunMany"]) {
 
     test(`light tracing's caustics agree with path tracing's, for ${scene}`, async () => {
 
         // Path tracing alone finds caustics slowly; light tracing quickly,
         // with the path tracer leaving those paths to it. The two must
-        // agree, over the floor and in the caustic.
+        // agree, over the floor and in the caustic. Path tracing alone
+        // needs longer for the scenes where light passes several pieces of
+        // glass.
         const size = 32;
         const traced = await trace(scene, { spp: 128, size, bounces: 8, caustics: true });
-        const alone = await trace(scene, { spp: 2048, size, bounces: 8, caustics: false });
+        const alone = await trace(scene, { spp: scene.endsWith("Many") ? 8192 : 2048, size, bounces: 8, caustics: false });
 
         const floor = interior(traced.hits, size, 0);
         const brightness = (r, i) => mean(rgb(r.pixels, i));

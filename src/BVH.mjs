@@ -11,7 +11,8 @@
  * leaf's are consecutive; order[i] is the original index of the i-th.
  *
  * It splits each node where the surface area heuristic says rays will do
- * the least work, trying 12 evenly spaced planes on each axis.
+ * the least work, trying 32 evenly spaced planes on each axis. See
+ * docs/bvh.md.
  */
 export class BVH {
 
@@ -88,7 +89,7 @@ export class BVH {
         addNode(0, count);
         const stack = count > maxLeafSize ? [0] : [];
 
-        const BINS = 12;
+        const BINS = 32;
         const bin_min = new Float64Array(BINS * 3);
         const bin_max = new Float64Array(BINS * 3);
         const bin_count = new Uint32Array(BINS);
