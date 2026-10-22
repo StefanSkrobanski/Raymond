@@ -53,10 +53,6 @@ const camera = new Camera();
 const controls = new OrbitControls(camera, canvas);
 renderer.camera = camera;
 
-// Dragging, pinching and the wheel stop the camera at surfaces, so it
-// can't go through walls (going home, or flying to a tapped point, can).
-controls.collide = (origin, direction, distance) =>
-    renderer.scene?.raycast(origin, direction, distance)?.distance ?? Infinity;
 
 let playing = true;
 let demo = SCENES[0];

@@ -833,29 +833,6 @@ test("tapping the image orbits round what's there, moving halfway to it, and foc
     await context.close();
 });
 
-test("zooming out can't take the camera through a wall", async () => {
-
-    const { page, context } = await open("index.html");
-    await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: SLOW_FRAME_MS });
-
-    // The sunbeams' room is closed, 6 by 3 by 6: scrolling out far enough
-    // to leave it would put the camera tens of units away.
-    await page.selectOption("#scene", "sunbeams");
-    await page.waitForFunction(() => window.raymond.renderer.samples >= 1, null, { timeout: SLOW_FRAME_MS });
-    await page.mouse.move(240, 160);
-    for (let k = 0; k < 40; ++k)
-        await page.mouse.wheel(0, 100);
-    await settled(page);
-
-    const p = await page.evaluate(() => {
-        const { x, y, z } = window.raymond.camera.position;
-        return [x, y, z];
-    });
-    assert.ok(Math.abs(p[0]) < 3 && p[1] > 0 && p[1] < 3 && Math.abs(p[2]) < 3, `the camera stayed in the room, at ${p}`);
-
-    await context.close();
-});
-
 test("the save button downloads the image as a PNG", async () => {
 
     const { page, context } = await open("index.html");
