@@ -29,7 +29,17 @@ const VIEW_NORMAL = 2u;
 const VIEW_DEPTH = 3u;
 `;
 
-/** Traces samplesPerFrame paths per pixel, adding them to the accumulation. */
+/**
+ * Traces samplesPerFrame paths per pixel, adding them to the accumulation,
+ * with the optional features given (see the constants below).
+ * @param {{ VOLUMES: boolean, TEXTURES: boolean, ENVIRONMENT: boolean, DISPERSION: boolean }} features
+ */
+export function traceShader(features) {
+    return TRACE_SHADER.replace(/^const (VOLUMES|TEXTURES|ENVIRONMENT|DISPERSION): bool = true;$/gm,
+        (_, name) => `const ${name}: bool = ${features[/** @type {keyof typeof features} */ (name)]};`);
+}
+
+/** The trace shader with every feature. */
 export const TRACE_SHADER = PARAMS + /* wgsl */ `
 const PI = 3.14159265358979;
 const NONE = 0xffffffffu;
@@ -37,13 +47,15 @@ const T_MIN = 1e-4;
 const INF = 1e30;
 
 // Whether the scene has volumes, textures (of any kind), an environment
-// map or glass that splits colours. Renderer turns off the ones a scene
-// doesn't use, so the compiler leaves their code out: even code that never
-// runs slows the rest down on some GPUs.
-override VOLUMES = true;
-override TEXTURES = true;
-override ENVIRONMENT = true;
-override DISPERSION = true;
+// map or glass that splits colours. Renderer compiles the shader with the
+// ones a scene doesn't use turned off (traceShader()), so the compiler
+// leaves their code out: even code that never runs slows the rest down on
+// some GPUs. (They're plain constants written into the source rather than
+// override constants, which Safari's compiler failed on.)
+const VOLUMES: bool = true;
+const TEXTURES: bool = true;
+const ENVIRONMENT: bool = true;
+const DISPERSION: bool = true;
 
 const SPHERE = 0u;
 const QUAD = 1u;

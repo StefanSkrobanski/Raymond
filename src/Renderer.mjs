@@ -2,7 +2,7 @@ import { Box } from "./Box.mjs";
 import { Mesh } from "./Mesh.mjs";
 import { Quad } from "./Quad.mjs";
 import { PRIMITIVE_KINDS } from "./Scene.mjs";
-import { DENOISE_SHADER, DISPLAY_SHADER, TRACE_SHADER } from "./shaders.mjs";
+import { DENOISE_SHADER, DISPLAY_SHADER, traceShader } from "./shaders.mjs";
 import { Vec3 } from "./Vec3.mjs";
 /** @import { Camera } from "./Camera.mjs" */
 /** @import { Scene } from "./Scene.mjs" */
@@ -54,7 +54,7 @@ const IMAGE_KEY_BYTES = 168;
 
 /**
  * Which of the trace shader's optional features a scene uses: its
- * override constants.
+ * constants (see traceShader()).
  * @typedef {{ VOLUMES: boolean, TEXTURES: boolean, ENVIRONMENT: boolean, DISPERSION: boolean }} Features
  */
 
@@ -88,7 +88,6 @@ export class Renderer {
     #canvas;
     #format;
 
-    #trace_module;
     // The trace pipelines for each combination of features (keyed by
     // featureKey()), made in the background when a scene first needs
     // them, and null until they're ready; until then the ones with every
@@ -191,18 +190,16 @@ export class Renderer {
      * @param {HTMLCanvasElement | OffscreenCanvas} canvas
      * @param {GPUCanvasContext} context
      * @param {GPUTextureFormat} format
-     * @param {GPUShaderModule} trace_module
      * @param {TracePipelines} trace_pipelines with every feature
      * @param {GPURenderPipeline} display_pipeline
      * @param {{ prepare: GPUComputePipeline, atrous: GPUComputePipeline, compose: GPUComputePipeline }} denoise_pipelines
      */
-    constructor(device, canvas, context, format, trace_module, trace_pipelines, display_pipeline, denoise_pipelines) {
+    constructor(device, canvas, context, format, trace_pipelines, display_pipeline, denoise_pipelines) {
 
         this.#device = device;
         this.#canvas = canvas;
         this.#context = context;
         this.#format = format;
-        this.#trace_module = trace_module;
         this.#all_pipelines = trace_pipelines;
         this.#trace_pipelines.set(featureKey(ALL_FEATURES), trace_pipelines);
         this.#display_pipeline = display_pipeline;
@@ -270,14 +267,13 @@ export class Renderer {
         const format = gpu.getPreferredCanvasFormat();
         context.configure({ device, format, alphaMode: "opaque" });
 
-        const trace_module = await Renderer.#shaderModule(device, TRACE_SHADER, "trace");
         const [trace_pipelines, display_pipeline, denoise_pipelines] = await Promise.all([
-            Renderer.#tracePipelines(device, trace_module, ALL_FEATURES),
+            Renderer.#tracePipelines(device, ALL_FEATURES),
             Renderer.#renderPipeline(device, DISPLAY_SHADER, format),
             Renderer.#denoisePipelines(device),
         ]);
 
-        return new Renderer(device, canvas, context, format, trace_module, trace_pipelines, display_pipeline, denoise_pipelines);
+        return new Renderer(device, canvas, context, format, trace_pipelines, display_pipeline, denoise_pipelines);
     }
 
     get device() {
@@ -985,8 +981,14 @@ export class Renderer {
 
         if (pipelines === undefined) {
             this.#trace_pipelines.set(key, null);
-            Renderer.#tracePipelines(this.#device, this.#trace_module, features)
-                .then((made) => this.#trace_pipelines.set(key, made));
+            // If a browser can't make them, the ones with every feature
+            // still work, only slower.
+            Renderer.#tracePipelines(this.#device, features).then(
+                (made) => this.#trace_pipelines.set(key, made),
+                (error) => {
+                    this.#trace_pipelines.set(key, this.#all_pipelines);
+                    console.error(`Couldn't make the trace pipelines for features ${key}:`, error);
+                });
         }
 
         return this.#all_pipelines;
@@ -998,13 +1000,12 @@ export class Renderer {
     // module's bindings).
     /**
      * @param {GPUDevice} device
-     * @param {GPUShaderModule} module
      * @param {Features} features
      * @returns {Promise<TracePipelines>}
      */
-    static async #tracePipelines(device, module, features) {
+    static async #tracePipelines(device, features) {
 
-        const constants = Object.fromEntries(Object.entries(features).map(([name, on]) => [name, on ? 1 : 0]));
+        const module = await Renderer.#shaderModule(device, traceShader(features), "trace");
 
         /** @type {(binding: number, layout: Omit<GPUBindGroupLayoutEntry, "binding" | "visibility">) => GPUBindGroupLayoutEntry} */
         const entry = (binding, layout) => ({ binding, visibility: COMPUTE_STAGE, ...layout });
@@ -1017,7 +1018,7 @@ export class Renderer {
         const pipeline = (entryPoint, entries) => device.createComputePipelineAsync({
             label: entryPoint,
             layout: device.createPipelineLayout({ bindGroupLayouts: [device.createBindGroupLayout({ entries })] }),
-            compute: { module, entryPoint, constants },
+            compute: { module, entryPoint },
         });
 
         const [trace, light, resolve, gather] = await Promise.all([
