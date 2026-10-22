@@ -22,6 +22,7 @@ import { PLANETS } from "../../scenes/solar.mjs";
 import { sphereflake } from "../../scenes/sphereflake.mjs";
 import { stones } from "../../scenes/stonehenge.mjs";
 import { TUMBLER, WATER } from "../../scenes/water.mjs";
+import { mirrorDepth, wavyMirror } from "../../scenes/wavymirror.mjs";
 
 const glass = Material.glass();
 
@@ -249,4 +250,17 @@ test("inside the mirror ball, the spheres float near the middle, clear of each o
         for (const b of spheres.slice(i + 1))
             assert.ok(a.center.subtract(b.center).length() > a.radius + b.radius + 0.1, `sphere ${i} clear of the others`);
     }
+});
+
+test("the funhouse mirror's waves stay inside its frame, and it's smooth and polished", () => {
+
+    // The frame is 0.4 deep, centred on the mirror's plane.
+    for (let x = -2; x <= 2; x += 0.05)
+        for (let y = 0.25; y <= 2.85; y += 0.05)
+            assert.ok(Math.abs(mirrorDepth(x, y)) < 0.18, `${x}, ${y}`);
+
+    const mirror = wavyMirror().scene.objects.find((o) => o instanceof Mesh && o.material.type == "metal");
+    assert.ok(mirror, "a metal mesh");
+    assert.ok(mirror.material.roughness < 0.01, "polished, so it reflects sharply");
+    assert.ok(mirror.normals, "with smooth normals, so its reflections don't break into facets");
 });

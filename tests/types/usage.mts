@@ -21,6 +21,10 @@ scene.add(
 const camera = new Camera({ position: new Vec3(0, 2, 6), target: new Vec3(0, 1, 0), aperture: 0.05 });
 const controls = new OrbitControls(camera, canvas, OrbitControls.viewFrom(camera.position, camera.target));
 controls.addEventListener("change", () => renderer.render());
+controls.collide = (origin, direction, distance) => scene.raycast(origin, direction, distance)?.distance ?? Infinity;
+controls.animateTo({ orbitPoint: new Vec3(0, 1, 0), radius: 3 }, { duration: 600 });
+// @ts-expect-error: the radius is a number
+controls.animateTo({ radius: "far" });
 
 const renderer: Renderer = await Renderer.create(canvas);
 renderer.scene = scene;

@@ -787,18 +787,71 @@ test("turning denoising off and on doesn't start the image again", async () => {
     await context.close();
 });
 
-test("tapping the image focuses there", async () => {
+// Waits until the camera has stopped moving: no change over a few
+// animation frames.
+async function settled(page) {
+    await page.waitForFunction(() => new Promise((resolve) => {
+        const where = () => {
+            const p = window.raymond.camera.position;
+            return [p.x, p.y, p.z].join();
+        };
+        const before = where();
+        let frames = 0;
+        const next = () => ++frames < 3 ? requestAnimationFrame(next) : resolve(where() == before);
+        requestAnimationFrame(next);
+    }), null, { timeout: SLOW_FRAME_MS, polling: 100 });
+}
+
+test("tapping the image orbits round what's there, moving halfway to it, and focuses on it", async () => {
+
+    const { page, context } = await open("index.html");
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: SLOW_FRAME_MS });
+    const before = await page.evaluate(() => window.raymond.camera.position.z);
+
+    // The middle of the Cornell box's back wall, at z = -1. The camera
+    // flies there on animation frames, which come slowly while SwiftShader
+    // renders.
+    await page.mouse.click(240, 110);
+    await page.waitForSelector("#toast.show");
+    await settled(page);
+
+    const { point, radius, distance, focus } = await page.evaluate(() => {
+        const { camera, controls } = window.raymond;
+        const p = controls.view.orbitPoint;
+        return {
+            point: [p.x, p.y, p.z],
+            radius: controls.view.radius,
+            distance: camera.position.subtract(p).length(),
+            focus: camera.focusDistance,
+        };
+    });
+    assert.ok(Math.abs(point[2] + 1) < 0.01, `orbiting round ${point}`);
+    assert.ok(Math.abs(radius - (before + 1) / 2) < 0.15, `radius ${radius}, from ${before + 1}`);
+    assert.ok(Math.abs(distance - radius) < 1e-3, `camera ${distance} away`);
+    assert.ok(Math.abs(focus - radius) < 1e-3, `focus ${focus}`);
+
+    await context.close();
+});
+
+test("zooming out can't take the camera through a wall", async () => {
 
     const { page, context } = await open("index.html");
     await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: SLOW_FRAME_MS });
 
-    // The middle of the Cornell box's back wall, about 4.85 away along
-    // the view direction (the camera is at z = 3.85, the wall at z = -1).
-    await page.mouse.click(240, 110);
-    await page.waitForSelector("#toast.show");
+    // The sunbeams' room is closed, 6 by 3 by 6: scrolling out far enough
+    // to leave it would put the camera tens of units away.
+    await page.selectOption("#scene", "sunbeams");
+    await page.waitForFunction(() => window.raymond.renderer.samples >= 1, null, { timeout: SLOW_FRAME_MS });
+    await page.mouse.move(240, 160);
+    for (let k = 0; k < 40; ++k)
+        await page.mouse.wheel(0, 100);
+    await settled(page);
 
-    const focus = await page.evaluate(() => window.raymond.camera.focusDistance);
-    assert.ok(Math.abs(focus - 4.85) < 0.05, `focus ${focus}`);
+    const p = await page.evaluate(() => {
+        const { x, y, z } = window.raymond.camera.position;
+        return [x, y, z];
+    });
+    assert.ok(Math.abs(p[0]) < 3 && p[1] > 0 && p[1] < 3 && Math.abs(p[2]) < 3, `the camera stayed in the room, at ${p}`);
 
     await context.close();
 });
