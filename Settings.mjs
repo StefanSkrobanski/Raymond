@@ -18,6 +18,8 @@ export const DEFAULT_SETTINGS = {
     tame_fireflies: true,            // clamp each path's brightness
     denoise: true,                   // smooth the noise while samples build up
     fast_preview: true,              // render a cheaper image while the camera moves
+    movement_pad: true,              // show the on-screen pad for walking about
+    stop_at_walls: false,            // dragging, zooming and walking stop at surfaces
     theme: "auto",                   // a key of THEMES
 };
 
@@ -58,6 +60,8 @@ export function sanitizeSettings(value) {
         tame_fireflies: typeof v.tame_fireflies === "boolean" ? v.tame_fireflies : d.tame_fireflies,
         denoise: typeof v.denoise === "boolean" ? v.denoise : d.denoise,
         fast_preview: typeof v.fast_preview === "boolean" ? v.fast_preview : d.fast_preview,
+        movement_pad: typeof v.movement_pad === "boolean" ? v.movement_pad : d.movement_pad,
+        stop_at_walls: typeof v.stop_at_walls === "boolean" ? v.stop_at_walls : d.stop_at_walls,
         theme: Object.hasOwn(THEMES, v.theme) ? v.theme : d.theme,
     };
 }

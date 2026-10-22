@@ -842,6 +842,9 @@ test("zooming out can't take the camera through a wall", async () => {
     // to leave it would put the camera tens of units away.
     await page.selectOption("#scene", "sunbeams");
     await page.waitForFunction(() => window.raymond.renderer.samples >= 1, null, { timeout: SLOW_FRAME_MS });
+    await page.click("#settings-button", { timeout: SLOW_FRAME_MS });
+    await page.check("#stop-at-walls");
+    await page.click("#settings-close");
     await page.mouse.move(240, 160);
     for (let k = 0; k < 40; ++k)
         await page.mouse.wheel(0, 100);
@@ -853,6 +856,36 @@ test("zooming out can't take the camera through a wall", async () => {
     });
     assert.ok(Math.abs(p[0]) < 3 && p[1] > 0 && p[1] < 3 && Math.abs(p[2]) < 3, `the camera stayed in the room, at ${p}`);
 
+    await context.close();
+});
+
+test("holding the movement pad's arrows walks the camera, and the keys do too", async () => {
+
+    const { page, errors, context } = await open("index.html");
+    await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: SLOW_FRAME_MS });
+    const where = () => page.evaluate(() => {
+        const { x, y, z } = window.raymond.camera.position;
+        return [x, y, z];
+    });
+
+    // The Cornell box's camera looks along -z: walking forward goes that
+    // way, and the view keeps its direction.
+    const start = await where();
+    const box = await page.locator('#pad [data-move="forward"]').boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.waitForFunction((z) => window.raymond.camera.position.z < z - 0.2, start[2], { timeout: SLOW_FRAME_MS });
+    await page.mouse.up();
+    await settled(page);
+    const walked = await where();
+    assert.ok(Math.abs(walked[0] - start[0]) < 1e-6 && Math.abs(walked[1] - start[1]) < 1e-6, `straight ahead: ${walked}`);
+
+    // E rises.
+    await page.keyboard.down("e");
+    await page.waitForFunction((y) => window.raymond.camera.position.y > y + 0.1, walked[1], { timeout: SLOW_FRAME_MS });
+    await page.keyboard.up("e");
+
+    assert.deepEqual(errors, []);
     await context.close();
 });
 

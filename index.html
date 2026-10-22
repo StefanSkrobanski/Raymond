@@ -144,6 +144,57 @@
             fill: currentColor;
         }
 
+        /* The movement pad: a cross of arrows, with rise and sink at its
+           right-hand corners. Held down, they keep moving. */
+        #pad {
+            position: fixed;
+            left: calc(16px + env(safe-area-inset-left));
+            bottom: calc(16px + env(safe-area-inset-bottom));
+            display: grid;
+            grid-template-columns: repeat(3, 40px);
+            grid-template-rows: repeat(3, 40px);
+            gap: 2px;
+            touch-action: none;
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-touch-callout: none;
+        }
+
+        #pad[hidden] {
+            display: none;
+        }
+
+        #pad button {
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: var(--button);
+            color: var(--text);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+            box-shadow: 0 2px 10px var(--shadow);
+            touch-action: none;
+            opacity: 0.85;
+        }
+
+        #pad button.held {
+            opacity: 1;
+            filter: brightness(1.25);
+        }
+
+        #pad svg {
+            fill: currentColor;
+        }
+
+        #pad [data-move="forward"] { grid-area: 1 / 2; }
+        #pad [data-move="up"] { grid-area: 1 / 3; border-radius: 50%; }
+        #pad [data-move="left"] { grid-area: 2 / 1; }
+        #pad [data-move="right"] { grid-area: 2 / 3; }
+        #pad [data-move="back"] { grid-area: 3 / 2; }
+        #pad [data-move="down"] { grid-area: 3 / 3; border-radius: 50%; }
+
         /* Settings panel, sliding in from the right. */
         #settings {
             position: fixed;
@@ -369,6 +420,15 @@
         </button>
     </div>
 
+    <div id="pad" aria-label="Movement">
+        <button type="button" data-move="forward" aria-label="Walk forward" title="Walk forward"><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M9 3l7 10H2z" /></svg></button>
+        <button type="button" data-move="up" aria-label="Rise" title="Rise"><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M9 2l6 7H3zM3 13h12v2H3z" /></svg></button>
+        <button type="button" data-move="left" aria-label="Step left" title="Step left"><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M3 9l10-7v14z" /></svg></button>
+        <button type="button" data-move="right" aria-label="Step right" title="Step right"><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M15 9 5 16V2z" /></svg></button>
+        <button type="button" data-move="back" aria-label="Walk back" title="Walk back"><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M9 15 2 5h14z" /></svg></button>
+        <button type="button" data-move="down" aria-label="Sink" title="Sink"><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M9 16 3 9h12zM3 3h12v2H3z" /></svg></button>
+    </div>
+
     <aside id="settings" aria-label="Settings">
         <header>
             <h2>Raymond</h2>
@@ -407,6 +467,12 @@
         <label class="check"><input id="fast-preview" type="checkbox"> Fast preview while moving</label>
         <p class="note">While the camera moves, draws a quick, rough image at a lower resolution (as low as your device needs to keep up), then the full one when it stops.</p>
 
+        <label class="check"><input id="movement-pad" type="checkbox"> Movement pad</label>
+        <p class="note">Arrows to walk forward, back and sideways, and to rise and sink. On a keyboard: WASD or the arrow keys, with Q and E to sink and rise.</p>
+
+        <label class="check"><input id="stop-at-walls" type="checkbox"> Stop at walls</label>
+        <p class="note">Keeps the camera from passing through walls and objects when dragging, zooming or walking.</p>
+
         <label class="check"><input id="tame-fireflies" type="checkbox"> Tame fireflies</label>
         <p class="note">Dims the rare very bright specks that take ages to average out, at a small cost in accuracy.</p>
 
@@ -414,7 +480,8 @@
 
         <div class="help">
             <p class="note">Drag to orbit, pinch or scroll to zoom, two fingers or right-drag to pan,
-                tap something to orbit round it (and move closer), double-tap to go back.</p>
+                tap something to orbit round it (and move closer), double-tap to go back.
+                The movement pad, or WASD, walks about.</p>
             <p class="note"><a href="https://github.com/StefanSkrobanski/Raymond">Source on GitHub</a></p>
         </div>
     </aside>

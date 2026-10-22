@@ -1,5 +1,6 @@
 import { Camera, OrbitControls, Renderer } from "./src/index.mjs";
 import { SCENES } from "./Scenes.mjs";
+/** @import { Vec3 } from "./src/index.mjs" */
 import {
     BOUNCES_RANGE, DEFAULT_SETTINGS, EXPOSURE_RANGE, RESOLUTIONS, SAMPLES_PER_FRAME_RANGE, SAMPLE_LIMITS, THEMES, VIEWS,
     loadSettings, saveSettings,
@@ -22,6 +23,10 @@ const APERTURE_SCALE = 0.04;
 // Tapping a surface orbits round it and moves this fraction of the way
 // from it to the camera, so a few taps cross a room.
 const TAP_APPROACH = 0.5;
+
+// Walking speed, in starting view distances a second, so it suits a room
+// or a landscape.
+const WALK_SPEED = 0.3;
 
 // The fast preview while the camera moves: how long a frame should take,
 // the most bounces, the range of its resolution (a fraction of the full
@@ -53,9 +58,10 @@ const camera = new Camera();
 const controls = new OrbitControls(camera, canvas);
 renderer.camera = camera;
 
-// Dragging, pinching and the wheel stop the camera at surfaces, so it
-// can't go through walls (going home, or flying to a tapped point, can).
-controls.collide = (origin, direction, distance) =>
+// With "Stop at walls", dragging, pinching, the wheel and walking stop the
+// camera at surfaces (going home, or flying to a tapped point, don't).
+/** @type {(origin: Vec3, direction: Vec3, distance: number) => number} */
+const collide = (origin, direction, distance) =>
     renderer.scene?.raycast(origin, direction, distance)?.distance ?? Infinity;
 
 let playing = true;
@@ -71,6 +77,7 @@ let scene_fov = camera.fov;
 // preview's resolution, which adapts to the device and is kept between
 // moves.
 let moving = false;
+let walk_speed = 1.0;
 let preview_scale = 0.5;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let settle_timer;
@@ -242,6 +249,7 @@ function loadScene({ changed = false } = {}) {
         settings.bounces = built.bounces ?? DEFAULT_SETTINGS.bounces;
 
     $("scene-name").textContent = demo.name;
+    walk_speed = WALK_SPEED * controls.view.radius;
     applySettings();
 }
 
@@ -262,6 +270,10 @@ function applySettings() {
     $("tame-fireflies").checked = settings.tame_fireflies;
     $("denoise").checked = settings.denoise;
     $("fast-preview").checked = settings.fast_preview;
+    $("movement-pad").checked = settings.movement_pad;
+    $("stop-at-walls").checked = settings.stop_at_walls;
+    $("pad").hidden = !settings.movement_pad;
+    controls.collide = settings.stop_at_walls ? collide : null;
 
     saveSettings(settings);
     applyTheme();
@@ -337,6 +349,16 @@ $("denoise").addEventListener("change", () => {
     applySettings();
 });
 
+$("movement-pad").addEventListener("change", () => {
+    settings.movement_pad = $("movement-pad").checked;
+    applySettings();
+});
+
+$("stop-at-walls").addEventListener("change", () => {
+    settings.stop_at_walls = $("stop-at-walls").checked;
+    applySettings();
+});
+
 $("fast-preview").addEventListener("change", () => {
     settings.fast_preview = $("fast-preview").checked;
     if (!settings.fast_preview) {
@@ -345,6 +367,96 @@ $("fast-preview").addEventListener("change", () => {
     }
     applySettings();
 });
+
+// ---- Walking ----
+
+// What's held down (a pointer on the pad, or a key) and which way it moves.
+/** @type {Map<string, string>} */
+const held = new Map();
+let walk_frame = 0;
+let walk_time = 0.0;
+
+// Forward, right and up for each way.
+/** @type {Record<string, [number, number, number]>} */
+const WAYS = {
+    forward: [1, 0, 0], back: [-1, 0, 0], left: [0, -1, 0], right: [0, 1, 0], up: [0, 0, 1], down: [0, 0, -1],
+};
+
+const KEYS = /** @type {Record<string, string>} */ ({
+    w: "forward", arrowup: "forward", s: "back", arrowdown: "back",
+    a: "left", arrowleft: "left", d: "right", arrowright: "right",
+    e: "up", pageup: "up", q: "down", pagedown: "down",
+});
+
+/** @param {number} time */
+function walk(time) {
+
+    walk_frame = 0;
+    if (held.size == 0)
+        return;
+
+    const dt = walk_time > 0.0 ? Math.min(time - walk_time, 100.0) / 1000.0 : 0.0;
+    walk_time = time;
+
+    let [forward, right, up] = [0, 0, 0];
+    for (const way of new Set(held.values())) {
+        forward += WAYS[way][0];
+        right += WAYS[way][1];
+        up += WAYS[way][2];
+    }
+    const step = walk_speed * dt;
+    if (step > 0.0 && (forward || right || up))
+        controls.move(forward * step, right * step, up * step);
+
+    walk_frame = requestAnimationFrame(walk);
+}
+
+/**
+ * @param {string} source
+ * @param {string} way
+ */
+function startWalking(source, way) {
+    held.set(source, way);
+    if (walk_frame == 0) {
+        walk_time = 0.0;
+        walk_frame = requestAnimationFrame(walk);
+    }
+}
+
+/** @param {string} source */
+function stopWalking(source) {
+    held.delete(source);
+}
+
+for (const button of /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll("#pad button"))) {
+    const way = /** @type {string} */ (button.dataset.move);
+    button.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        button.setPointerCapture(e.pointerId);
+        button.classList.add("held");
+        startWalking(`pointer ${e.pointerId}`, way);
+    });
+    for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
+        button.addEventListener(type, (e) => {
+            button.classList.remove("held");
+            stopWalking(`pointer ${/** @type {PointerEvent} */ (e).pointerId}`);
+        });
+    }
+    // A long press shouldn't open a menu.
+    button.addEventListener("contextmenu", (e) => e.preventDefault());
+}
+
+addEventListener("keydown", (e) => {
+    const way = KEYS[e.key.toLowerCase()];
+    const target = /** @type {HTMLElement} */ (e.target);
+    if (!way || e.ctrlKey || e.metaKey || e.altKey || target.closest("input, select, textarea"))
+        return;
+    e.preventDefault();
+    startWalking(`key ${e.key.toLowerCase()}`, way);
+});
+
+addEventListener("keyup", (e) => stopWalking(`key ${e.key.toLowerCase()}`));
+addEventListener("blur", () => held.clear());
 
 // ---- Theme ----
 

@@ -200,6 +200,38 @@ export class OrbitControls extends EventTarget {
         };
     }
 
+    /**
+     * Moves the camera and the orbit point together, as if walking:
+     * forward along the way the camera faces (kept level), right, and up,
+     * in world units. With collide set, the camera stops at walls.
+     * @param {number} forward
+     * @param {number} right
+     * @param {number} [up]
+     */
+    move(forward, right, up = 0.0) {
+
+        this.#stopAnimation();
+        this.#velocity = new Vec2(0.0, 0.0);
+
+        // Level, so walking doesn't sink into the floor when looking down.
+        const ahead = new Vec3(-Math.cos(this.#azimuth), 0.0, -Math.sin(this.#azimuth));
+        const side = new Vec3(Math.sin(this.#azimuth), 0.0, -Math.cos(this.#azimuth));
+        let step = ahead.scale(forward).add(side.scale(right)).add(new Vec3(0.0, up, 0.0));
+
+        // Stopping just short of a wall, as dragging does.
+        const length = step.length();
+        if (this.#collide && length > 0.0) {
+            const direction = step.scale(1.0 / length);
+            const blocked = this.#collide(this.#camera.position, direction, length);
+            const gap = 0.02 * this.#radius;
+            if (blocked < length + gap)
+                step = direction.scale(Math.max(blocked - gap, 0.0));
+        }
+
+        this.#orbit_point = this.#orbit_point.add(step);
+        this.#updateCamera();
+    }
+
     /** Animates back to the home view. */
     reset() {
         this.animateTo(this.#home);
