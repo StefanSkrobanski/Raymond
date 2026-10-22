@@ -235,6 +235,40 @@ const SCENES = {
         camera: LOOK_DOWN,
     }),
 
+    // Glass balls and a pane of glass, so light tracing
+    // aims at each and shares the weight of light that could have been
+    // aimed at more than one: seen from the lamp, or the sun, the middle
+    // ball lies wholly behind the pane, which barely bends the light, so
+    // its caustic stays sharp. The camera sees that caustic past the pane.
+    // The lamp is big enough for path tracing alone to find it through
+    // the pane and the ball.
+    causticLampMany: () => ({
+        scene: new Scene({ sky: Sky.black() }).add(
+            floor(),
+            new Sphere(new Vec3(0, 0.6, 0), 0.4, Material.glass(1.5)),
+            Box.fromCorners(new Vec3(-0.5, 1.5, -0.5), new Vec3(0.5, 1.52, 0.5), Material.glass(1.5)),
+            new Sphere(new Vec3(1.0, 0.35, 0.4), 0.35, Material.glass(1.5)),
+            new Sphere(new Vec3(0.05, 2.6, 0), 0.3, Material.light(WHITE, 15.0))),
+        camera: LOOK_DOWN,
+    }),
+
+    // The sun through a skylight of two panes, side by side, and on
+    // through a glass ball: under the ceiling, all the floor's light comes
+    // through the glass. The panes' spheres overlap, and the ball's circle
+    // lies within theirs. The sun is big, for path tracing alone to find.
+    causticSunMany: () => ({
+        scene: new Scene({
+            sky: new Sky({ zenith: BLACK, horizon: BLACK, ground: BLACK, sunStrength: 1.0, sunDirection: new Vec3(0.2, 1, 0.1), sunSize: 0.2 }),
+        }).add(
+            floor(),
+            ...[[-20, -1, -20, 20], [1.1, 20, -20, 20], [-1, 1.1, -20, -0.5], [-1, 1.1, 0.5, 20]].map(([x0, x1, z0, z1]) =>
+                new Quad(new Vec3(x0, 1.6, z0), new Vec3(x1 - x0, 0, 0), new Vec3(0, 0, z1 - z0), Material.diffuse(BLACK))),
+            Box.fromCorners(new Vec3(-1, 1.59, -0.5), new Vec3(0.05, 1.61, 0.5), Material.glass(1.5)),
+            Box.fromCorners(new Vec3(0.05, 1.59, -0.5), new Vec3(1.1, 1.61, 0.5), Material.glass(1.5)),
+            new Sphere(new Vec3(0.2, 0.5, 0), 0.35, Material.glass(1.5))),
+        camera: { position: new Vec3(0, 1.4, 2.0), target: new Vec3(0.1, 0, -0.2), fov: Math.PI / 2.5 },
+    }),
+
     // A caustic seen through glass, for photon mapping: the lamp through a
     // glass ball onto the floor, seen through a pane of glass. The lamp is
     // big enough for path tracing alone to find it, slowly.

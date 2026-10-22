@@ -1,0 +1,57 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Raymond benchmark</title>
+<canvas id="canvas" width="320" height="240"></canvas>
+<script type="module">
+    // Renders demo scenes for a while each and reports how fast: see
+    // tools/bench.mjs, which drives this page.
+    import { Camera, Renderer } from "../src/index.mjs";
+    import { SCENES } from "../Scenes.mjs";
+
+    const canvas = document.getElementById("canvas");
+    const renderer = await Renderer.create(canvas);
+
+    // Paths per second for one scene: frames of samplesPerFrame paths per
+    // pixel, after a couple of seconds to warm up, for at least seconds.
+    window.bench = async (id, { seconds = 3, samplesPerFrame = 4, caustics = true } = {}) => {
+
+        const demo = SCENES.find((s) => s.id == id);
+        const t0 = performance.now();
+        const built = demo.build();
+        const build_ms = performance.now() - t0;
+
+        const t1 = performance.now();
+        built.scene.pack();
+        const pack_ms = performance.now() - t1;
+
+        renderer.scene = built.scene;
+        renderer.camera = new Camera(built.camera);
+        renderer.maxBounces = built.bounces ?? 8;
+        renderer.samplesPerFrame = samplesPerFrame;
+        renderer.denoise = false;
+        renderer.caustics = caustics;
+
+        // The renderer makes pipelines suited to the scene in the
+        // background, so give it time to before measuring.
+        const warm = performance.now();
+        for (let i = 0; i < 2 || performance.now() - warm < 2000; ++i) {
+            renderer.render();
+            await renderer.device.queue.onSubmittedWorkDone();
+        }
+
+        renderer.reset();
+        const start = performance.now();
+        let frames = 0;
+        while (performance.now() - start < seconds * 1000) {
+            renderer.render();
+            await renderer.device.queue.onSubmittedWorkDone();
+            frames++;
+        }
+        const elapsed = (performance.now() - start) / 1000;
+        const paths = canvas.width * canvas.height * samplesPerFrame * frames;
+
+        return { id, primitives: built.scene.primitiveCount, build_ms, pack_ms, mpaths: paths / elapsed / 1e6, frames };
+    };
+
+    window.ready = true;
+</script>

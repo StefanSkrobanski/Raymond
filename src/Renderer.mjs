@@ -37,12 +37,37 @@ const PARAMS_BYTES = 208;
 // a frame: see shaders.mjs.
 const PHOTON_TABLE = 1048576;
 const PHOTON_CAPACITY = 524288;
+// Light tracing aims at the spheres round at most this many groups of
+// mirrors and glass.
+const MAX_TARGETS = 16;
 // The denoiser's à-trous passes, each spreading twice as far as the last.
 const ATROUS_STEPS = [1, 2, 4, 8, 16];
 const STORAGE_READ = /** @type {GPUBufferBindingType} */ ("read-only-storage");
 const COMPUTE_STAGE = 0x4;
 // The part of the uniforms that decides the image: see shaders.mjs.
 const IMAGE_KEY_BYTES = 168;
+
+/**
+ * The path tracer's pipelines: the trace, and light tracing's passes.
+ * @typedef {{ trace: GPUComputePipeline, light: GPUComputePipeline, resolve: GPUComputePipeline, gather: GPUComputePipeline }} TracePipelines
+ */
+
+/**
+ * Which of the trace shader's optional features a scene uses: its
+ * override constants.
+ * @typedef {{ VOLUMES: boolean, TEXTURES: boolean, ENVIRONMENT: boolean, DISPERSION: boolean }} Features
+ */
+
+/**
+ * A scene's mirrors and glass, for light tracing: the sphere round them
+ * all, the spheres round up to MAX_TARGETS groups of them for photons to
+ * aim at, and how far out from those to start the sun's light so it
+ * passes everything that might shade them.
+ * @typedef {{ centre: Vec3, radius: number, reach: number, targets: { centre: Vec3, radius: number }[] }} DeltaObjects
+ */
+
+/** @type {Features} */
+const ALL_FEATURES = Object.freeze({ VOLUMES: true, TEXTURES: true, ENVIRONMENT: true, DISPERSION: true });
 
 /**
  * A progressive path tracer on WebGPU. Each render() adds samplesPerFrame
@@ -63,8 +88,16 @@ export class Renderer {
     #canvas;
     #format;
 
-    /** @type {{ trace: GPUComputePipeline, light: GPUComputePipeline, resolve: GPUComputePipeline, gather: GPUComputePipeline }} */
-    #trace_pipelines;
+    #trace_module;
+    // The trace pipelines for each combination of features (keyed by
+    // featureKey()), made in the background when a scene first needs
+    // them, and null until they're ready; until then the ones with every
+    // feature do. Leaving out code a scene doesn't use makes the rest
+    // faster.
+    /** @type {Map<string, TracePipelines | null>} */
+    #trace_pipelines = new Map();
+    /** @type {TracePipelines} */
+    #all_pipelines;
     #display_pipeline;
     #denoise_pipelines;
     #params_buffer;
@@ -89,12 +122,11 @@ export class Renderer {
     /** @type {GPUBuffer | null} */
     #emitters = null;
     // From the uploaded scene, for light tracing: each light's primitive
-    // and power, and the sphere round every mirror and glass object (null
-    // for none: no caustics).
+    // and power, and the mirrors and glass (null for none: no caustics).
     /** @type {{ prim: number, power: number }[]} */
     #light_powers = [];
-    /** @type {{ centre: Vec3, radius: number, reach: number } | null} */
-    #delta_sphere = null;
+    /** @type {DeltaObjects | null} */
+    #deltas = null;
     /** @type {GPUBindGroup | null} */
     #light_group = null;
     /** @type {GPUBindGroup | null} */
@@ -123,6 +155,8 @@ export class Renderer {
     #uploaded_version = -1;
     #light_count = 0;
     #volume_count = 0;
+    #textured = false;
+    #dispersive = false;
     // The sky's environment map, and its table for picking directions, as
     // uploaded, and which environment they came from (undefined: none yet).
     /** @type {GPUTexture | null} */
@@ -157,17 +191,20 @@ export class Renderer {
      * @param {HTMLCanvasElement | OffscreenCanvas} canvas
      * @param {GPUCanvasContext} context
      * @param {GPUTextureFormat} format
-     * @param {{ trace: GPUComputePipeline, light: GPUComputePipeline, resolve: GPUComputePipeline, gather: GPUComputePipeline }} trace_pipelines
+     * @param {GPUShaderModule} trace_module
+     * @param {TracePipelines} trace_pipelines with every feature
      * @param {GPURenderPipeline} display_pipeline
      * @param {{ prepare: GPUComputePipeline, atrous: GPUComputePipeline, compose: GPUComputePipeline }} denoise_pipelines
      */
-    constructor(device, canvas, context, format, trace_pipelines, display_pipeline, denoise_pipelines) {
+    constructor(device, canvas, context, format, trace_module, trace_pipelines, display_pipeline, denoise_pipelines) {
 
         this.#device = device;
         this.#canvas = canvas;
         this.#context = context;
         this.#format = format;
-        this.#trace_pipelines = trace_pipelines;
+        this.#trace_module = trace_module;
+        this.#all_pipelines = trace_pipelines;
+        this.#trace_pipelines.set(featureKey(ALL_FEATURES), trace_pipelines);
         this.#display_pipeline = display_pipeline;
         this.#denoise_pipelines = denoise_pipelines;
 
@@ -233,13 +270,14 @@ export class Renderer {
         const format = gpu.getPreferredCanvasFormat();
         context.configure({ device, format, alphaMode: "opaque" });
 
+        const trace_module = await Renderer.#shaderModule(device, TRACE_SHADER, "trace");
         const [trace_pipelines, display_pipeline, denoise_pipelines] = await Promise.all([
-            Renderer.#tracePipelines(device),
+            Renderer.#tracePipelines(device, trace_module, ALL_FEATURES),
             Renderer.#renderPipeline(device, DISPLAY_SHADER, format),
             Renderer.#denoisePipelines(device),
         ]);
 
-        return new Renderer(device, canvas, context, format, trace_pipelines, display_pipeline, denoise_pipelines);
+        return new Renderer(device, canvas, context, format, trace_module, trace_pipelines, display_pipeline, denoise_pipelines);
     }
 
     get device() {
@@ -395,6 +433,13 @@ export class Renderer {
 
         this.#writeParams(scene, camera, width, height);
 
+        const pipelines = this.#pipelinesFor({
+            VOLUMES: this.#volume_count > 0,
+            TEXTURES: this.#textured,
+            ENVIRONMENT: scene.sky.environment != null,
+            DISPERSION: this.#dispersive,
+        });
+
         const encoder = this.#device.createCommandEncoder();
 
         // Photon mapping's grid starts each frame empty.
@@ -402,18 +447,18 @@ export class Renderer {
             encoder.clearBuffer(/** @type {GPUBuffer} */ (this.#photon_heads));
 
         const compute = encoder.beginComputePass();
-        compute.setPipeline(this.#trace_pipelines.trace);
+        compute.setPipeline(pipelines.trace);
         compute.setBindGroup(0, this.#trace_group);
         compute.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
 
         if (caustics) {
-            compute.setPipeline(this.#trace_pipelines.light);
+            compute.setPipeline(pipelines.light);
             compute.setBindGroup(0, this.#light_group);
             compute.dispatchWorkgroups(Math.ceil(Math.min(width * height * this.#samples_per_frame, PHOTON_CAPACITY) / 64));
-            compute.setPipeline(this.#trace_pipelines.resolve);
+            compute.setPipeline(pipelines.resolve);
             compute.setBindGroup(0, this.#resolve_group);
             compute.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
-            compute.setPipeline(this.#trace_pipelines.gather);
+            compute.setPipeline(pipelines.gather);
             compute.setBindGroup(0, this.#gather_group);
             compute.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
         }
@@ -537,6 +582,8 @@ export class Renderer {
 
         this.#light_count = lights.length;
         this.#volume_count = packed.volumes.length;
+        this.#textured = packed.textures.length + packed.normalMaps.length > 0;
+        this.#dispersive = packed.materialList.some((m) => m.dispersion > 0);
 
         // Each light's power, for light tracing to choose among them by:
         // its luminance times pi times its area.
@@ -550,11 +597,11 @@ export class Renderer {
             const area = prim_uints[b] == PRIMITIVE_KINDS.quad ? v(8).cross(v(12)).length() : 4 * Math.PI * prim_floats[b + 7] ** 2;
             return { prim, power: luminance * Math.PI * area };
         });
-        this.#delta_sphere = deltaSphere(scene);
+        this.#deltas = deltaObjects(scene);
         this.#emitters?.destroy();
         this.#emitters = this.#device.createBuffer({
             label: "emitters",
-            size: (lights.length + 1) * 32,
+            size: (2 + lights.length + MAX_TARGETS) * 16,
             usage: BUFFER_STORAGE | BUFFER_COPY_DST,
         });
         this.#textures?.destroy();
@@ -614,10 +661,13 @@ export class Renderer {
     /** @param {Scene} scene */
     #writeEmitters(scene) {
 
-        const sphere = this.#delta_sphere;
+        const delta = this.#deltas;
         const sky = scene.sky;
-        if (!sphere || !this.#emitters)
+        if (!delta || !this.#emitters)
             return false;
+
+        // The sun's power is what falls on the targets' circles.
+        const circles = delta.targets.reduce((sum, t) => sum + Math.PI * t.radius ** 2, 0);
 
         /** @type {{ prim: number, power: number }[]} */
         const sources = [...this.#light_powers];
@@ -625,29 +675,34 @@ export class Renderer {
             const omc = 2.0 * Math.sin(sky.sunSize / 2.0) ** 2;
             const r = sky.sunRadiance;
             const luminance = 0.2126 * r.x + 0.7152 * r.y + 0.0722 * r.z;
-            sources.push({ prim: 0xffffffff, power: luminance * 2 * Math.PI * omc * Math.PI * sphere.radius ** 2 });
+            sources.push({ prim: 0xffffffff, power: luminance * 2 * Math.PI * omc * circles });
         }
 
         const total = sources.reduce((sum, e) => sum + e.power, 0);
         if (!(total > 0))
             return false;
 
+        // A header (how many sources and targets, how far out the sun's
+        // light starts, and the targets' circles' total area), then each
+        // source's cumulative chance, primitive (NONE for the sun) and
+        // chance, then each target's centre and radius.
         const data = new Float32Array(this.#emitters.size / 4);
         const uints = new Uint32Array(data.buffer);
+        uints[0] = sources.length;
+        uints[1] = delta.targets.length;
+        data[2] = delta.reach;
+        data[3] = circles;
+
         let running = 0;
-        for (let k = 0; k < data.length / 8; ++k) {
-            const source = sources[k];
-            if (!source) {
-                data[k * 8] = 2.0; // never reached
-                continue;
-            }
+        sources.forEach((source, k) => {
             running += source.power / total;
-            data[k * 8] = k == sources.length - 1 ? 1.0 : running;
-            uints[k * 8 + 1] = source.prim;
-            data[k * 8 + 2] = source.power / total;
-            data[k * 8 + 3] = sphere.reach;
-            data.set([sphere.centre.x, sphere.centre.y, sphere.centre.z, sphere.radius], k * 8 + 4);
-        }
+            data[4 + k * 4] = k == sources.length - 1 ? 1.0 : running;
+            uints[4 + k * 4 + 1] = source.prim;
+            data[4 + k * 4 + 2] = source.power / total;
+        });
+        delta.targets.forEach((t, j) => {
+            data.set([t.centre.x, t.centre.y, t.centre.z, t.radius], 4 + (sources.length + j) * 4);
+        });
 
         this.#device.queue.writeBuffer(this.#emitters, 0, data);
         return true;
@@ -741,7 +796,7 @@ export class Renderer {
         });
 
         this.#light_group = this.#device.createBindGroup({
-            layout: this.#trace_pipelines.light.getBindGroupLayout(0),
+            layout: this.#all_pipelines.light.getBindGroupLayout(0),
             entries: [
                 { binding: 0, resource: { buffer: this.#params_buffer } },
                 { binding: 1, resource: { buffer: primitives } },
@@ -759,7 +814,7 @@ export class Renderer {
         });
 
         this.#gather_group = this.#device.createBindGroup({
-            layout: this.#trace_pipelines.gather.getBindGroupLayout(0),
+            layout: this.#all_pipelines.gather.getBindGroupLayout(0),
             entries: [
                 { binding: 0, resource: { buffer: this.#params_buffer } },
                 { binding: 1, resource: { buffer: primitives } },
@@ -776,7 +831,7 @@ export class Renderer {
         });
 
         this.#resolve_group = this.#device.createBindGroup({
-            layout: this.#trace_pipelines.resolve.getBindGroupLayout(0),
+            layout: this.#all_pipelines.resolve.getBindGroupLayout(0),
             entries: [
                 { binding: 0, resource: { buffer: this.#params_buffer } },
                 { binding: 6, resource: { buffer: accum } },
@@ -785,7 +840,7 @@ export class Renderer {
         });
 
         this.#trace_group = this.#device.createBindGroup({
-            layout: this.#trace_pipelines.trace.getBindGroupLayout(0),
+            layout: this.#all_pipelines.trace.getBindGroupLayout(0),
             entries: [
                 { binding: 0, resource: { buffer: this.#params_buffer } },
                 { binding: 1, resource: { buffer: primitives } },
@@ -901,14 +956,15 @@ export class Renderer {
         // Photon mapping's radius: about 3 pixels across where the camera
         // sees the mirrors and glass, shrinking with each frame as
         // progressive photon mapping's does (r² ∝ frames^-1/3), so the
-        // blur it leaves fades and the average converges. The grid's cells
-        // are twice the starting radius.
-        const sphere = this.#delta_sphere;
+        // blur it leaves fades and the average converges. The grid is
+        // rebuilt each frame with cells twice the radius, so a gather's 8
+        // cells hold the photons it needs and few more.
+        const sphere = this.#deltas;
         const distance = sphere ? Math.max(camera.position.subtract(sphere.centre).length(), sphere.radius) : 1;
         const start = Math.max(3 * 2 * Math.tan(camera.fov / 2) * distance / height, 1e-5);
         const frame = Math.floor(this.#samples / Math.max(this.#samples_per_frame, 1)) + 1;
         f[48] = start * frame ** (-1 / 6);
-        f[49] = 2 * start;
+        f[49] = 2 * f[48];
 
         this.#device.queue.writeBuffer(this.#params_buffer, 0, this.#params);
     }
@@ -917,12 +973,38 @@ export class Renderer {
      * @param {GPUDevice} device
      * @param {string} code
      */
-    // The path tracer, and light tracing's two passes, which have explicit
-    // layouts since each uses only some of the module's bindings.
-    /** @param {GPUDevice} device */
-    static async #tracePipelines(device) {
+    // The trace pipelines for the features a scene uses, or the ones with
+    // every feature while those are being made.
+    /** @param {Features} features */
+    #pipelinesFor(features) {
 
-        const module = await Renderer.#shaderModule(device, TRACE_SHADER, "trace");
+        const key = featureKey(features);
+        const pipelines = this.#trace_pipelines.get(key);
+        if (pipelines)
+            return pipelines;
+
+        if (pipelines === undefined) {
+            this.#trace_pipelines.set(key, null);
+            Renderer.#tracePipelines(this.#device, this.#trace_module, features)
+                .then((made) => this.#trace_pipelines.set(key, made));
+        }
+
+        return this.#all_pipelines;
+    }
+
+    // The path tracer, and light tracing's passes, with the features
+    // given. Their layouts are explicit, so bind groups work with every
+    // combination of features (and each pass uses only some of the
+    // module's bindings).
+    /**
+     * @param {GPUDevice} device
+     * @param {GPUShaderModule} module
+     * @param {Features} features
+     * @returns {Promise<TracePipelines>}
+     */
+    static async #tracePipelines(device, module, features) {
+
+        const constants = Object.fromEntries(Object.entries(features).map(([name, on]) => [name, on ? 1 : 0]));
 
         /** @type {(binding: number, layout: Omit<GPUBindGroupLayoutEntry, "binding" | "visibility">) => GPUBindGroupLayoutEntry} */
         const entry = (binding, layout) => ({ binding, visibility: COMPUTE_STAGE, ...layout });
@@ -935,11 +1017,16 @@ export class Renderer {
         const pipeline = (entryPoint, entries) => device.createComputePipelineAsync({
             label: entryPoint,
             layout: device.createPipelineLayout({ bindGroupLayouts: [device.createBindGroupLayout({ entries })] }),
-            compute: { module, entryPoint },
+            compute: { module, entryPoint, constants },
         });
 
         const [trace, light, resolve, gather] = await Promise.all([
-            device.createComputePipelineAsync({ label: "trace", layout: "auto", compute: { module, entryPoint: "main" } }),
+            pipeline("main", [
+                uniform(0), read(1), read(2), read(3), read(4), read(5), write(6), write(7), write(8),
+                array(9), entry(10, { sampler: { type: "filtering" } }), array(11),
+                entry(12, { texture: { sampleType: "float" } }), entry(13, { texture: { sampleType: "unfilterable-float" } }),
+                entry(14, { sampler: { type: "filtering" } }),
+            ]),
             pipeline("light_trace", [
                 uniform(0), read(1), read(2), read(3), read(4),
                 array(9), entry(10, { sampler: { type: "filtering" } }), array(11),
@@ -1046,47 +1133,102 @@ function toHalf(x) {
     return (e << 10) | mantissa;
 }
 
-// The sphere round every mirror and glass object in the scene, or null if
-// there are none.
-/** @param {Scene} scene */
-function deltaSphere(scene) {
+// The scene's mirrors and glass, for light tracing, or null if there are
+// none.
+/**
+ * @param {Scene} scene
+ * @returns {DeltaObjects | null}
+ */
+function deltaObjects(scene) {
 
-    /** @type {Vec3[]} */
-    const points = [];
+    // Each mirror or glass object's box.
+    /** @type {{ min: number[], max: number[], centre: number[] }[]} */
+    const boxes = [];
     for (const object of scene.objects) {
         const m = object.material;
         if (!(m.type == "glass" || (m.type == "metal" && m.roughness < 0.01)))
             continue;
+        /** @type {Vec3[]} */
+        let points;
         if (object instanceof Mesh)
-            points.push(...object.positions);
+            points = object.positions;
         else if (object instanceof Box)
-            points.push(...object.corners());
+            points = object.corners();
         else if (object instanceof Quad)
-            points.push(object.corner, object.corner.add(object.u), object.corner.add(object.v), object.corner.add(object.u).add(object.v));
+            points = [object.corner, object.corner.add(object.u), object.corner.add(object.v), object.corner.add(object.u).add(object.v)];
         else {
             const r = new Vec3(object.radius, object.radius, object.radius);
-            points.push(object.center.subtract(r), object.center.add(r));
+            points = [object.center.subtract(r), object.center.add(r)];
         }
+        const box = boxAround(points.map((p) => [p.x, p.y, p.z]));
+        boxes.push({ ...box, centre: box.min.map((c, a) => (c + box.max[a]) / 2) });
     }
 
-    if (points.length == 0)
+    if (boxes.length == 0)
         return null;
 
+    // Split the biggest group in two, across its longest side, until
+    // there are enough (or every object has its own).
+    const groups = [boxes];
+    while (groups.length < MAX_TARGETS) {
+        let biggest = -1, size = 0;
+        groups.forEach((g, i) => {
+            const s = g.length > 1 ? radius(boxAround(g.flatMap((b) => [b.min, b.max]))) : 0;
+            if (s > size) {
+                biggest = i;
+                size = s;
+            }
+        });
+        if (biggest < 0)
+            break;
+        const group = groups[biggest];
+        const spread = boxAround(group.map((b) => b.centre));
+        const extent = spread.max.map((c, a) => c - spread.min[a]);
+        const axis = extent.indexOf(Math.max(...extent));
+        group.sort((p, q) => p.centre[axis] - q.centre[axis]);
+        groups.splice(biggest, 1, group.slice(0, group.length >> 1), group.slice(group.length >> 1));
+    }
+
+    /** @type {(box: { min: number[], max: number[] }) => { centre: Vec3, radius: number }} */
+    const sphereAround = (box) => ({
+        centre: new Vec3((box.min[0] + box.max[0]) / 2, (box.min[1] + box.max[1]) / 2, (box.min[2] + box.max[2]) / 2),
+        radius: Math.max(radius(box), 1e-3) * 1.001,
+    });
+    const targets = groups.map((g) => sphereAround(boxAround(g.flatMap((b) => [b.min, b.max]))));
+    const all = sphereAround(boxAround(boxes.flatMap((b) => [b.min, b.max])));
+
+    // Far enough out along any direction from any target to be outside the
+    // whole scene, so sunlight starting there passes everything that might
+    // shade the glass.
+    const bounds = scene.bounds();
+    const middle = bounds ? bounds.min.add(bounds.max).scale(0.5) : new Vec3(0, 0, 0);
+    const reach = bounds ?
+        Math.max(...targets.map((t) => t.centre.subtract(middle).length())) + bounds.max.subtract(bounds.min).length() / 2 + 1 : 1;
+
+    return { ...all, reach, targets };
+}
+
+// The smallest box round some points, each [x, y, z].
+/** @param {number[][]} points */
+function boxAround(points) {
     const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
     for (const p of points) {
-        [p.x, p.y, p.z].forEach((c, a) => {
-            min[a] = Math.min(min[a], c);
-            max[a] = Math.max(max[a], c);
-        });
+        for (let a = 0; a < 3; ++a) {
+            min[a] = Math.min(min[a], p[a]);
+            max[a] = Math.max(max[a], p[a]);
+        }
     }
-    const lo = new Vec3(min[0], min[1], min[2]), hi = new Vec3(max[0], max[1], max[2]);
-    const centre = lo.add(hi).scale(0.5);
+    return { min, max };
+}
 
-    // Far enough out along any direction to be outside the whole scene, so
-    // sunlight starting there passes everything that might shade the glass.
-    const bounds = scene.bounds();
-    const reach = bounds ?
-        centre.subtract(bounds.min.add(bounds.max).scale(0.5)).length() + bounds.max.subtract(bounds.min).length() / 2 + 1 : 1;
+// Half a box's diagonal.
+/** @param {{ min: number[], max: number[] }} box */
+function radius(box) {
+    return Math.hypot(box.max[0] - box.min[0], box.max[1] - box.min[1], box.max[2] - box.min[2]) / 2;
+}
 
-    return { centre, radius: Math.max(hi.subtract(lo).length() / 2, 1e-3) * 1.001, reach };
+// The key #trace_pipelines files pipelines with these features under.
+/** @param {Features} features */
+function featureKey(features) {
+    return [features.VOLUMES, features.TEXTURES, features.ENVIRONMENT, features.DISPERSION].map(Number).join("");
 }
