@@ -4,6 +4,8 @@ A progressive path tracer for WebGPU, in plain JavaScript ES modules with no dep
 
 **Live demo:** <https://stefanskrobanski.github.io/Raymond/>. It needs WebGPU: a recent Chrome or Edge, Safari 26, or Firefox 141 on Windows.
 
+**How it works:** [a deep dive](https://stefanskrobanski.github.io/Raymond/how-it-works.html) into the maths, from camera rays and the rendering equation through Monte Carlo, materials, caustics and denoising, with each formula as the code computes it.
+
 ## What it does
 
 - **Path tracing in a compute shader**, with next event estimation (aiming rays straight at lights) combined with BSDF sampling by multiple importance sampling, and Russian roulette to end dim paths.

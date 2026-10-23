@@ -10,6 +10,7 @@ The repo holds:
 
 - **The library** in `src/`, published to npm as `@stefanskrobanski/raymond` (MIT). `src/index.mjs` is the entry point and the public API; `Mat2`, `Mat3` and `shaders.mjs` are internal. Types are JSDoc comments; TypeScript (a dev dependency only) checks them and generates `types/*.d.mts` when packing (gitignored). Type-only names (`View`, `CameraOptions`, `Hit`, ...) are re-exported from `index.mjs` as `@typedef`s.
 - **The demo app** at the root (`index.html`, `main.mjs`, `Settings.mjs`, `Scenes.mjs`, `scenes/`), which imports the library only through `src/index.mjs`. `examples/basic.html` uses it by package name through an import map.
+- **How it works** (`how-it-works.html`, linked from the settings panel): a deep dive into the maths, each formula as the code computes it, with function names. It's built: edit `tools/how-it-works.src.html` (HTML with LaTeX, `$$...$$` for display and `\(...\)` inline) and run `python3 tools/build-how-it-works.py` (needs `pip install latex2mathml`), which turns the maths into MathML that browsers draw natively, so the page loads no scripts. Write `\lt` for <, avoid `aligned` (it converts badly; use separate equations), and use `\sum\limits` for limits above and below. When the shader's maths changes, update the page.
 
 ## Commands
 

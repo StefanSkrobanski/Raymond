@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <!-- BUILD NOTE -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>How Raymond works</title>
+    <meta name="description" content="A deep dive into how Raymond, a WebGPU path tracer, turns a scene into a picture: the maths of light, Monte Carlo, materials, caustics and denoising.">
+    <link rel="icon" type="image/png" href="icon-192.png">
+
+    <script>
+        // The theme, as the app stores it, before the first paint.
+        try {
+            const stored = JSON.parse(localStorage.getItem("raymond-settings") || "{}").theme;
+            const dark = stored === "dark" ||
+                (stored !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+            document.documentElement.dataset.theme = dark ? "dark" : "light";
+        }
+        catch {
+            document.documentElement.dataset.theme =
+                matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+    </script>
+
+    <style>
+        :root {
+            color-scheme: light;
+            --text: #1a1c20;
+            --muted: #5a606b;
+            --background: #fbfaf7;
+            --panel: #f1eee7;
+            --border: rgba(0, 0, 0, 0.14);
+            --accent: #c2410c;
+            --figure: #33363d;
+        }
+
+        :root[data-theme="dark"] {
+            color-scheme: dark;
+            --text: #e6e8ee;
+            --muted: #9ba2ae;
+            --background: #0f1116;
+            --panel: #181b23;
+            --border: rgba(255, 255, 255, 0.14);
+            --accent: #ff8a4c;
+            --figure: #c9cdd6;
+        }
+
+        html {
+            background: var(--background);
+            color: var(--text);
+        }
+
+        body {
+            max-width: 44rem;
+            margin: 0 auto;
+            padding: calc(24px + env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+                     calc(48px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+            font: 17px/1.62 Charter, "Bitstream Charter", "Iowan Old Style", Georgia, serif;
+            overflow-wrap: break-word;
+        }
+
+        h1, h2, h3, nav, .back, figcaption, table {
+            font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        }
+
+        h1 {
+            font-size: 2.1rem;
+            line-height: 1.15;
+            margin: 0.4em 0 0.2em;
+        }
+
+        .subtitle {
+            color: var(--muted);
+            font-size: 1.1rem;
+            margin-top: 0;
+        }
+
+        h2 {
+            font-size: 1.4rem;
+            margin: 2.2em 0 0.4em;
+            padding-top: 0.6em;
+            border-top: 1px solid var(--border);
+        }
+
+        h3 {
+            font-size: 1.08rem;
+            margin: 1.6em 0 0.3em;
+        }
+
+        a {
+            color: var(--accent);
+        }
+
+        .back {
+            font-size: 0.95rem;
+        }
+
+        nav {
+            background: var(--panel);
+            border-radius: 10px;
+            padding: 0.8em 1.2em;
+            font-size: 0.95rem;
+        }
+
+        nav ol {
+            margin: 0.3em 0;
+            padding-left: 1.4em;
+            columns: 2;
+            column-gap: 2em;
+        }
+
+        @media (max-width: 34rem) {
+            nav ol {
+                columns: 1;
+            }
+        }
+
+        code {
+            font: 0.86em/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+            background: var(--panel);
+            padding: 0.1em 0.3em;
+            border-radius: 4px;
+        }
+
+        /* Equations on their own lines scroll sideways on a narrow screen
+           rather than spilling out of the page. */
+        .equation {
+            overflow-x: auto;
+            overflow-y: hidden;
+            margin: 0.9em 0;
+            padding: 0.2em 0;
+        }
+
+        math {
+            font-size: 1.06em;
+        }
+
+        math[display="block"] {
+            margin: 0;
+        }
+
+        .note {
+            background: var(--panel);
+            border-left: 3px solid var(--accent);
+            border-radius: 0 8px 8px 0;
+            padding: 0.6em 1em;
+            margin: 1.2em 0;
+        }
+
+        .note p {
+            margin: 0.3em 0;
+        }
+
+        figure {
+            margin: 1.6em 0;
+            text-align: center;
+        }
+
+        figure svg {
+            max-width: 100%;
+            height: auto;
+            color: var(--figure);
+        }
+
+        figure svg .accent {
+            color: var(--accent);
+        }
+
+        figcaption {
+            color: var(--muted);
+            font-size: 0.88rem;
+            margin-top: 0.4em;
+        }
+
+        table {
+            border-collapse: collapse;
+            font-size: 0.9rem;
+            margin: 1em 0;
+            width: 100%;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 0.35em 0.6em;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+
+        .table {
+            overflow-x: auto;
+        }
+    </style>
+</head>
+
+<body>
+
+    <p class="back"><a href="./">← Back to Raymond</a></p>
+
+    <h1>How Raymond works</h1>
+    <p class="subtitle">A deep dive into path tracing: how a few hundred lines of maths, run billions of times on the
+        GPU, turn a description of a scene into a picture lit as light really lights it.</p>
+
+    <nav aria-label="Contents">
+        <strong>Contents</strong>
+        <ol>
+            <li><a href="#rays">From pixels to rays</a></li>
+            <li><a href="#light">What a pixel measures</a></li>
+            <li><a href="#monte-carlo">Monte Carlo</a></li>
+            <li><a href="#paths">Path tracing</a></li>
+            <li><a href="#hits">Finding what a ray hits</a></li>
+            <li><a href="#materials">Materials</a></li>
+            <li><a href="#lights">Aiming at the lights</a></li>
+            <li><a href="#mis">Multiple importance sampling</a></li>
+            <li><a href="#sky">Skies and environment maps</a></li>
+            <li><a href="#fog">Fog</a></li>
+            <li><a href="#caustics">Caustics</a></li>
+            <li><a href="#denoising">Denoising</a></li>
+            <li><a href="#display">From numbers to colours</a></li>
+            <li><a href="#gpu">On the GPU</a></li>
+            <li><a href="#reading">Further reading</a></li>
+        </ol>
+    </nav>
+
+    <p>Raymond is a <em>path tracer</em>. It doesn't paint shadows, reflections or soft light on: it follows light
+        itself, as rays bouncing round the scene, and lets those effects appear on their own. Every term below is
+        something the code actually computes; where it helps, the name of the function in
+        <a href="https://github.com/StefanSkrobanski/Raymond/blob/main/src/shaders.mjs"><code>src/shaders.mjs</code></a>
+        is given, so you can read the real thing.</p>
+
+    <h2 id="rays">1. From pixels to rays</h2>
+
+    <p>A ray is a starting point and a direction: the points along it are</p>
+
+    $$\mathbf{r}(t) = \mathbf{o} + t\,\mathbf{d}, \qquad t > 0.$$
+
+    <p>The camera has a position \(\mathbf{c}\) and three unit vectors: right \(\mathbf{u}\), up \(\mathbf{v}\) and
+        forward \(\mathbf{w}\) (it looks down its own \(-z\) axis, as in OpenGL, so \(\mathbf{w}\) points into the
+        scene). For a field of view \(\varphi\), and a point \((p_x, p_y)\) in an image \(W \times H\) pixels across,
+        the point on the screen in coordinates from \(-1\) to \(1\) is</p>
+
+    $$x = \frac{2p_x}{W} - 1, \qquad y = 1 - \frac{2p_y}{H},$$
+
+    <p>and the ray through it (<code>camera_ray()</code>) is</p>
+
+    $$\mathbf{d} = \operatorname{normalize}\!\left(\mathbf{w} + x\,a\tan\tfrac{\varphi}{2}\,\mathbf{u} + y\tan\tfrac{\varphi}{2}\,\mathbf{v}\right),$$
+
+    <p>where \(a = W/H\) is the aspect ratio. Each sample aims at a random point inside its pixel,
+        \((p_x, p_y) = (i + \xi_1, j + \xi_2)\) with \(\xi\) uniform on \([0, 1)\), so the average over many samples
+        is the average colour <em>across</em> the pixel: edges come out smooth rather than jagged, for free.</p>
+
+    <figure>
+        <svg viewBox="0 0 560 220" width="560" height="220" role="img" aria-label="Rays from the camera through the pixels of the screen into the scene">
+            <g fill="none" stroke="currentColor" stroke-width="1.5">
+                <circle cx="50" cy="110" r="5" fill="currentColor" />
+                <rect x="200" y="40" width="20" height="140" />
+                <line x1="200" y1="75" x2="220" y2="75" />
+                <line x1="200" y1="110" x2="220" y2="110" />
+                <line x1="200" y1="145" x2="220" y2="145" />
+                <circle cx="440" cy="80" r="45" />
+                <rect x="380" y="160" width="150" height="10" />
+            </g>
+            <g class="accent" stroke="currentColor" stroke-width="1.5" fill="none">
+                <line x1="50" y1="110" x2="410" y2="45" />
+                <line x1="50" y1="110" x2="400" y2="98" />
+                <line x1="50" y1="110" x2="450" y2="160" />
+            </g>
+            <g fill="currentColor" font-family="system-ui, sans-serif" font-size="13">
+                <text x="30" y="140">camera</text>
+                <text x="180" y="200">pixels</text>
+                <text x="420" y="22">scene</text>
+            </g>
+        </svg>
+        <figcaption>One ray from the camera through each pixel; where it lands decides what that pixel sees.</figcaption>
+    </figure>
+
+    <h3>Depth of field</h3>
+
+    <p>A real lens has a size. With an aperture of radius \(R\) focused at distance \(f\), Raymond starts each ray at a
+        random point on the lens, \(\mathbf{o} = \mathbf{c} + R(s\,\mathbf{u} + t\,\mathbf{v})\) with \((s, t)\)
+        drawn evenly over the unit disc, and aims it at the point the pinhole ray would reach on the plane of focus:</p>
+
+    $$\mathbf{p}_f = \mathbf{c} + \frac{f}{\mathbf{d}\cdot\mathbf{w}}\,\mathbf{d}, \qquad \mathbf{d}' = \operatorname{normalize}(\mathbf{p}_f - \mathbf{o}).$$
+
+    <p>Everything on that plane lands on the same pixel whichever part of the lens the ray came through, so it's
+        sharp; anything nearer or further spreads into a blur. The disc points come from Shirley and Chiu's
+        <em>concentric</em> mapping, which keeps neighbouring random numbers neighbours on the disc.</p>
+
+    <h2 id="light">2. What a pixel measures</h2>
+
+    <p>The quantity light carries along a ray is <em>radiance</em>, \(L\): power per unit area, per unit solid angle.
+        It's what a camera sensor responds to, and it has the useful property of staying constant along a ray through
+        empty space. A pixel's value is the radiance arriving along its rays, averaged over the pixel and the lens.</p>
+
+    <p>Radiance leaving a point \(\mathbf{x}\) in direction \(\omega_o\) is what the surface gives off itself, plus all
+        the light arriving from every direction that it reflects towards \(\omega_o\). That is the <em>rendering
+        equation</em> (Kajiya, 1986):</p>
+
+    $$L_o(\mathbf{x},\omega_o) = L_e(\mathbf{x},\omega_o) + \int_{\Omega} f(\mathbf{x},\omega_i,\omega_o)\, L_i(\mathbf{x},\omega_i)\, \cos\theta_i \,\mathrm{d}\omega_i .$$
+
+    <ul>
+        <li>\(L_e\) is emitted light: zero except on lamps and glowing materials.</li>
+        <li>\(\Omega\) is the hemisphere of directions above the surface, and \(\mathrm{d}\omega_i\) a small patch of
+            directions.</li>
+        <li>\(f\) is the <em>BSDF</em>: what fraction of light arriving from \(\omega_i\) leaves towards
+            \(\omega_o\). It is what makes paint look different from chrome or glass.</li>
+        <li>\(\cos\theta_i = \mathbf{n}\cdot\omega_i\): light arriving at a slant spreads over more area, so it
+            counts for less.</li>
+        <li>\(L_i(\mathbf{x},\omega_i)\) is the radiance arriving, which is the radiance <em>leaving</em> whatever
+            surface the ray from \(\mathbf{x}\) towards \(\omega_i\) hits first. So the unknown \(L\) appears on both
+            sides: light bounces.</li>
+    </ul>
+
+    <figure>
+        <svg viewBox="0 0 520 220" width="520" height="220" role="img" aria-label="Light arriving at a point from every direction over a hemisphere, and some of it leaving towards the camera">
+            <g fill="none" stroke="currentColor" stroke-width="1.5">
+                <line x1="60" y1="180" x2="460" y2="180" />
+                <path d="M120 180 A140 140 0 0 1 400 180" stroke-dasharray="5 5" />
+                <line x1="260" y1="180" x2="260" y2="90" />
+                <path d="M255 96 L260 88 L265 96" />
+            </g>
+            <g class="accent" fill="none" stroke="currentColor" stroke-width="1.5">
+                <line x1="160" y1="80" x2="255" y2="176" />
+                <line x1="215" y1="58" x2="258" y2="175" />
+                <line x1="330" y1="60" x2="262" y2="175" />
+                <line x1="250" y1="176" x2="140" y2="130" />
+                <path d="M244 166 L256 177 L240 176" />
+                <path d="M150 128 L139 129 L146 137" />
+            </g>
+            <g fill="currentColor" font-family="system-ui, sans-serif" font-size="13">
+                <text x="266" y="96">n</text>
+                <text x="120" y="70">incoming L</text>
+                <text x="70" y="128">to camera</text>
+                <text x="250" y="200">x</text>
+                <text x="390" y="110">Ω</text>
+            </g>
+        </svg>
+        <figcaption>The light leaving \(\mathbf{x}\) towards the camera gathers light arriving from the whole hemisphere
+            \(\Omega\) above it, weighted by the material and the cosine.</figcaption>
+    </figure>
+
+    <h2 id="monte-carlo">3. Monte Carlo</h2>
+
+    <p>The rendering equation has no formula for an answer: the integral is over every direction, and every
+        direction's \(L_i\) is another such integral, and so on, bounce after bounce. Raymond estimates it by
+        <em>Monte Carlo</em> integration. To estimate \(I = \int f(x)\,\mathrm{d}x\), draw random points \(X_k\) from
+        any probability density \(p\) and average:</p>
+
+    $$\langle I \rangle_N = \frac{1}{N}\sum\limits_{k=1}^{N} \frac{f(X_k)}{p(X_k)} .$$
+
+    <p>This is <em>unbiased</em>: its expected value is exactly \(I\), whatever \(N\), provided \(p\) is nonzero wherever
+        \(f\) is. Its error shrinks as</p>
+
+    $$\sigma_{\langle I \rangle_N} = \frac{\sigma}{\sqrt{N}},$$
+
+    <p>so four times the samples halve the noise. That's the grain in a young image, and why it clears quickly at
+        first, then slowly: going from 1 to 16 samples removes three quarters of the noise; from 1024 to 4096 only
+        half of what's left.</p>
+
+    <p>A <em>sample</em> in Raymond is one such random estimate of a pixel. The renderer adds each frame's samples to a
+        running sum per pixel, and shows the sum divided by the count: the running average \(\langle I\rangle_N\). The
+        progress bar is \(N\) out of the sample limit.</p>
+
+    <h3>Importance sampling</h3>
+
+    <p>Any density \(p\) gives the right answer on average, but not with the same noise. The variance vanishes
+        altogether if \(p\) is proportional to \(f\), since then every \(f(X)/p(X)\) is the same number. We never know
+        \(f\) exactly (it's the answer), but we know parts of it, such as the material and where the lamps are, and
+        drawing directions in proportion to those is what most of the rest of this page is about. Each section says
+        which density it draws from; the estimator always divides by it, so nothing is biased.</p>
+
+    <h2 id="paths">4. Path tracing</h2>
+
+    <p>Apply Monte Carlo to the rendering equation with <em>one</em> sampled direction per bounce, and the recursion
+        turns into a single path: from the camera, hit a surface, pick a new direction \(\omega_i\) with density
+        \(p(\omega_i)\), and carry on from where that ray lands. Along the way the path keeps a <em>throughput</em>
+        \(\boldsymbol\beta\), starting at \(1\), of how much of the light found further on reaches the camera:</p>
+
+    $$\boldsymbol\beta \leftarrow \boldsymbol\beta \, \frac{f(\omega_i,\omega_o)\cos\theta_i}{p(\omega_i)}, \qquad L \leftarrow L + \boldsymbol\beta\, L_e .$$
+
+    <p>\(\boldsymbol\beta\) is a colour (red, green and blue separately), which is how a white light bouncing off a red
+        wall turns pink in the shadows: colour bleeding comes out of this one line. The code has it as
+        <code>throughput *= bs.weight</code> in <code>radiance()</code>, where every material returns the ratio
+        \(f\cos\theta/p\) directly.</p>
+
+    <h3>Russian roulette</h3>
+
+    <p>Paths have to stop, but stopping after a fixed number of bounces loses light. After the first three bounces, Raymond
+        plays <em>Russian roulette</em> (<code>roulette()</code>): the path survives with probability</p>
+
+    $$q = \min\!\left(\max(\beta_r, \beta_g, \beta_b),\ 0.95\right),$$
+
+    <p>and if it does, \(\boldsymbol\beta \leftarrow \boldsymbol\beta/q\). On average,
+        \(q\cdot\boldsymbol\beta/q + (1-q)\cdot 0 = \boldsymbol\beta\): unbiased again, but dim paths, which can add
+        little, mostly end early, and the time goes on the bright ones. The bounce limit in the settings is a ceiling
+        on top of that.</p>
+
+    <h2 id="hits">5. Finding what a ray hits</h2>
+
+    <p>Every bounce needs the nearest surface along a ray. Raymond has four kinds of primitive (a mesh is just many
+        triangles), each with its own test (<code>intersect()</code>), and each test mirrored exactly on the CPU in
+        <code>Scene.raycast</code>, so tapping the image finds the same surface the GPU drew.</p>
+
+    <h3>Spheres</h3>
+
+    <p>A point is on a sphere of centre \(\mathbf{c}\) and radius \(r\) when \(\lVert\mathbf{p}-\mathbf{c}\rVert = r\).
+        Putting in \(\mathbf{r}(t)\) gives a quadratic in \(t\). With \(\mathbf{m} = \mathbf{o}-\mathbf{c}\):</p>
+
+    $$t = \frac{-b \pm \sqrt{b^2 - ac}}{a}, \qquad a = \mathbf{d}\cdot\mathbf{d},\quad b = \mathbf{m}\cdot\mathbf{d},\quad c = \mathbf{m}\cdot\mathbf{m} - r^2 .$$
+
+    <p>A negative discriminant is a miss; otherwise the smaller root in range is the way in, or the larger one from
+        inside (glass needs both).</p>
+
+    <h3>Quads and triangles</h3>
+
+    <p>A quad is a corner \(\mathbf{q}\) and two edges \(\mathbf{e}_u\), \(\mathbf{e}_v\). The ray meets its plane, of
+        normal \(\mathbf{n} = \mathbf{e}_u\times\mathbf{e}_v\), at</p>
+
+    $$t = \frac{\mathbf{n}\cdot(\mathbf{q}-\mathbf{o})}{\mathbf{n}\cdot\mathbf{d}},$$
+
+    <p>and the hit \(\mathbf{h} = \mathbf{r}(t) - \mathbf{q}\) is inside if both of its coordinates along the edges,
+        \(\alpha = \mathbf{n}\cdot(\mathbf{h}\times\mathbf{e}_v)/\lVert\mathbf{n}\rVert^2\) and
+        \(\beta = \mathbf{n}\cdot(\mathbf{e}_u\times\mathbf{h})/\lVert\mathbf{n}\rVert^2\), lie in \([0, 1]\). Those
+        coordinates double as texture coordinates.</p>
+
+    <p>Triangles use the Möller–Trumbore test, which solves
+        \(\mathbf{o} + t\mathbf{d} = (1-u-v)\,\mathbf{v}_0 + u\,\mathbf{v}_1 + v\,\mathbf{v}_2\) for \((t, u, v)\)
+        by Cramer's rule. With \(\mathbf{e}_1 = \mathbf{v}_1-\mathbf{v}_0\), \(\mathbf{e}_2 = \mathbf{v}_2-\mathbf{v}_0\),
+        \(\mathbf{s} = \mathbf{o}-\mathbf{v}_0\), \(\mathbf{p} = \mathbf{d}\times\mathbf{e}_2\) and
+        \(\mathbf{q} = \mathbf{s}\times\mathbf{e}_1\):</p>
+
+    $$\begin{pmatrix} t \\ u \\ v \end{pmatrix} = \frac{1}{\mathbf{p}\cdot\mathbf{e}_1}\begin{pmatrix} \mathbf{q}\cdot\mathbf{e}_2 \\ \mathbf{p}\cdot\mathbf{s} \\ \mathbf{q}\cdot\mathbf{d} \end{pmatrix},$$
+
+    <p>a hit if \(u \ge 0\), \(v \ge 0\) and \(u + v \le 1\). The same \((u, v)\) blend the vertices' normals, for smooth
+        shading, and their texture coordinates.</p>
+
+    <h3>Boxes, and the BVH</h3>
+
+    <p>A box, which can be turned any way, is tested in its own coordinates, where it spans \(-1\) to \(1\) on every
+        axis. There, each axis gives an interval of \(t\) where the ray is between that pair of faces:</p>
+
+    $$t_{\text{near}} = \max_{k}\, \min\!\left(\frac{-1-o_k}{d_k}, \frac{1-o_k}{d_k}\right), \qquad t_{\text{far}} = \min_{k}\, \max\!\left(\frac{-1-o_k}{d_k}, \frac{1-o_k}{d_k}\right),$$
+
+    <p>and the ray hits the box when \(t_{\text{near}} \le t_{\text{far}}\). This <em>slab test</em> is also how Raymond
+        avoids testing every primitive. They're sorted into a <em>bounding volume hierarchy</em>, a tree of boxes,
+        each holding two smaller boxes, down to leaves of a few primitives. A ray that misses a box skips everything
+        in it, so it typically tests a few dozen primitives rather than tens of thousands. The tree is built to
+        minimise the <em>surface area heuristic</em>, the expected cost of a random ray,</p>
+
+    $$C = C_{\text{box}} + \frac{A_L}{A}\,N_L\,C_{\text{prim}} + \frac{A_R}{A}\,N_R\,C_{\text{prim}},$$
+
+    <p>since the chance that a ray through a box also passes through a box inside it is the ratio of their surface
+        areas. The <a href="https://github.com/StefanSkrobanski/Raymond/blob/main/docs/bvh.md">BVH notes</a> go into
+        it in detail.</p>
+
+    <div class="note">
+        <p><strong>Getting off the surface.</strong> A new ray starting exactly on a surface can hit that same surface
+            again through rounding error, speckling the image with false shadows. Raymond nudges every new ray off the
+            surface, by \(10^{-4}\max(1, \lVert\mathbf{p}\rVert_\infty)\) along the normal, on the side it leaves by
+            (<code>offset()</code>).</p>
+    </div>
+
+    <h2 id="materials">6. Materials</h2>
+
+    <p>Each material is a BSDF \(f\) together with a way of drawing directions from it. Raymond keeps the two in one
+        place (<code>eval_bsdf()</code> gives \(f\cos\theta\) and \(p\); <code>sample_bsdf()</code> draws a direction
+        and returns their ratio), so they can't drift apart.</p>
+
+    <h3>Diffuse</h3>
+
+    <p>A perfectly matte surface (Lambertian) scatters light equally in all directions: \(f = \rho/\pi\), where
+        \(\rho\) is its colour, the fraction of light it reflects. The \(\pi\) is what makes it reflect exactly
+        \(\rho\) in total, since \(\int_\Omega \cos\theta\,\mathrm{d}\omega = \pi\). Directions are drawn with
+        <em>cosine-weighted</em> density, \(p = \cos\theta/\pi\), by picking a point evenly on the unit disc and
+        lifting it onto the hemisphere:</p>
+
+    $$r = \sqrt{\xi_1},\quad \phi = 2\pi\xi_2, \qquad \omega = \left(r\cos\phi,\ r\sin\phi,\ \sqrt{1-r^2}\right).$$
+
+    <p>Then \(f\cos\theta/p = \rho\) exactly: every bounce off a matte wall just multiplies the throughput by its
+        colour, with no noise from the choice of direction at all.</p>
+
+    <h3>Metal: microfacets</h3>
+
+    <p>Rough metal is modelled as a surface of tiny perfect mirrors (microfacets) facing every which way. The
+        <em>GGX</em> distribution says how many face along each half-vector
+        \(\mathbf{h} = \operatorname{normalize}(\omega_i + \omega_o)\), with roughness \(\alpha = \text{roughness}^2\):</p>
+
+    $$D(\mathbf{h}) = \frac{\alpha^2}{\pi\left((\mathbf{n}\cdot\mathbf{h})^2(\alpha^2-1)+1\right)^2} .$$
+
+    <p>Some facets shadow others; Smith's masking term accounts for that, for each direction:</p>
+
+    $$G_1(\omega) = \frac{2\,(\mathbf{n}\cdot\omega)}{\mathbf{n}\cdot\omega + \sqrt{\alpha^2 + (1-\alpha^2)(\mathbf{n}\cdot\omega)^2}}, \qquad G = G_1(\omega_i)\,G_1(\omega_o) .$$
+
+    <p>And metals reflect more at grazing angles, towards white; Schlick's approximation of the Fresnel factor, starting
+        from the metal's own colour \(F_0\):</p>
+
+    $$F(\theta) = F_0 + (1-F_0)(1-\cos\theta)^5 .$$
+
+    <p>Together, the Cook–Torrance BSDF:</p>
+
+    $$f(\omega_i,\omega_o) = \frac{F\,D\,G}{4\,(\mathbf{n}\cdot\omega_i)(\mathbf{n}\cdot\omega_o)} .$$
+
+    <p>Directions are drawn by picking a facet in proportion to \(D(\mathbf{h})\cos\theta_h\), with
+        \(\cos\theta_h = \sqrt{(1-\xi)/(1+(\alpha^2-1)\xi)}\), and reflecting \(\omega_o\) in it. Reflecting about
+        \(\mathbf{h}\) doubles angles, so the density of the outgoing direction is</p>
+
+    $$p(\omega_i) = \frac{D(\mathbf{h})\,(\mathbf{n}\cdot\mathbf{h})}{4\,(\omega_o\cdot\mathbf{h})} .$$
+
+    <p>Below a roughness of 0.01, metal is treated as a perfect mirror: a <em>delta</em> BSDF, all of whose light leaves
+        in exactly one direction. No density can describe that, so Raymond handles delta surfaces separately: they
+        reflect (or, for glass, refract) the one way, with weight \(F\), and skip the light aiming of
+        <a href="#lights">section 7</a>, which could never land on that one direction.</p>
+
+    <h3>Glass</h3>
+
+    <p>At a glass surface light either reflects or refracts. Snell's law bends it, with the refractive indices on each
+        side:</p>
+
+    $$\eta_1\sin\theta_1 = \eta_2\sin\theta_2,$$
+
+    <p>and the exact Fresnel equations say how much reflects, averaging the two polarisations, with
+        \(\eta = \eta_2/\eta_1\):</p>
+
+    $$r_s = \frac{\cos\theta_1 - \eta\cos\theta_2}{\cos\theta_1 + \eta\cos\theta_2}, \qquad r_p = \frac{\eta\cos\theta_1 - \cos\theta_2}{\eta\cos\theta_1 + \cos\theta_2}, \qquad F = \tfrac12\left(r_s^2 + r_p^2\right) .$$
+
+    <p>(When \(\sin\theta_2\) would exceed 1, all the light reflects: total internal reflection, which makes the
+        bright rims inside a glass ball.) Rather than following both, Raymond reflects with probability \(F\) and
+        refracts otherwise. Each choice's weight is then its share divided by its probability, \(F/F = 1\): glass costs
+        no noise for the choice. Tinted glass multiplies by its colour once, on the way in.</p>
+
+    <h3>Dispersion</h3>
+
+    <p>Real glass bends blue more than red, which is how a prism makes a rainbow. Raymond uses Cauchy's equation for
+        the index at wavelength \(\lambda\) (in micrometres),</p>
+
+    $$n(\lambda) = n_d + B\left(\frac{1}{\lambda^2} - \frac{1}{\lambda_d^2}\right),$$
+
+    <p>with \(\lambda_d = 0.5876\,\mu\text{m}\), and works \(B\) out from the Abbe number \(V_d\) that glassmakers
+        quote, \(V_d = (n_d - 1)/(n_F - n_C)\):</p>
+
+    $$B = \frac{n_d - 1}{V_d\left(\lambda_F^{-2} - \lambda_C^{-2}\right)}, \qquad \lambda_F = 0.4861,\ \lambda_C = 0.6563 .$$
+
+    <p>The first time a path refracts through such glass it commits to one wavelength, and from then on carries only
+        that wavelength's colour (Wyman, Sloan and Shirley's fit to the CIE colour matching functions, scaled so the
+        average over the spectrum is white). Choosing wavelengths at random would make the colours converge slowly;
+        instead each pixel steps through the spectrum by the golden ratio,</p>
+
+    $$u_k = \operatorname{frac}\!\left(u_0 + k\,\varphi\right), \qquad \varphi = \frac{\sqrt5 - 1}{2},$$
+
+    <p>which spreads any number of samples almost evenly across it (a low-discrepancy sequence).</p>
+
+    <h3>Plastic</h3>
+
+    <p>Plastic is a clear varnish over coloured paint: a GGX coat (like metal, but with the Fresnel of a dielectric,
+        \(F_0 = ((\eta-1)/(\eta+1))^2\), about 4%) over a diffuse base that gets only the light the coat lets through
+        on the way in and out. Each sample picks one layer to draw from, glossy or diffuse, and the density is the
+        mixture of both, so either choice is weighted correctly.</p>
+
+    <h2 id="lights">7. Aiming at the lights</h2>
+
+    <p>A small lamp is hard to hit by bouncing at random: a path reaching it by chance is rare, and when it does it
+        brings back a lot of light, which is exactly the recipe for noise. So at every surface Raymond also aims one
+        ray straight at a light (<em>next event estimation</em>, <code>sample_light()</code>). If nothing is in the
+        way, that light is added in:</p>
+
+    $$L \leftarrow L + \boldsymbol\beta\,\frac{f(\omega_l,\omega_o)\,\cos\theta\; L_e}{p_l(\omega_l)} .$$
+
+    <p>A light is chosen evenly among the lamps, the sun and the sky, and the density includes that chance. For a
+        rectangular lamp of area \(A\), a point is chosen evenly on it, density \(1/A\) per area, which has to be
+        turned into a density per solid angle, as seen from the surface: a patch \(\mathrm{d}A\) at distance \(r\),
+        tilted by \(\theta_l\) from facing us, covers \(\mathrm{d}\omega = \cos\theta_l\,\mathrm{d}A/r^2\), so</p>
+
+    $$p_l(\omega) = \frac{r^2}{A\cos\theta_l} .$$
+
+    <p>A round lamp is sampled better still: Raymond picks a direction evenly within the cone it covers,
+        \(\cos\theta = 1 - \xi\,(1-\cos\theta_{\max})\) with \(\sin\theta_{\max} = r/d\), for density</p>
+
+    $$p_l(\omega) = \frac{1}{2\pi\,(1-\cos\theta_{\max})} .$$
+
+    <p>For a small or distant lamp \(1-\cos\theta_{\max}\) is tiny, and computing it as written would lose it to rounding;
+        the code uses the equivalent \(x/(1+\sqrt{1-x})\) with \(x = r^2/d^2\) (<code>sphere_omc()</code>). The sun is
+        a cone too, a fixed one in the direction of the sun.</p>
+
+    <h2 id="mis">8. Multiple importance sampling</h2>
+
+    <p>Now there are two ways to find a lamp: aim at it, or bounce into it. Counting both would count it twice; and
+        each is good at different times. Aiming wins for small lamps on matte surfaces; bouncing wins for big lamps
+        seen in shiny ones, where aiming picks directions the material barely reflects. Veach's <em>multiple
+        importance sampling</em> uses both and weights each sample by how good its strategy was at producing it. With
+        the <em>power heuristic</em>, a sample drawn by strategy \(a\) counts with weight</p>
+
+    $$w_a(\omega) = \frac{p_a(\omega)^2}{p_a(\omega)^2 + p_b(\omega)^2},$$
+
+    <p>where \(p_b\) is the density the <em>other</em> strategy would have had of choosing the same direction
+        (<code>light_pdf()</code> for a bounce that hit a lamp). The two weights add up to 1 for every direction, so
+        the result stays unbiased, and whichever strategy was more likely to find a direction gets most of the say in
+        it. The result is about as good as the better of the two everywhere, without having to choose.</p>
+
+    <h2 id="sky">9. Skies and environment maps</h2>
+
+    <p>Without a panorama, the sky is a gradient from horizon to zenith, plus a sun. With one (an HDR photograph of
+        light from every direction), a direction \(\omega\) maps to texture coordinates \(u\) round the horizon and
+        \(v\) down from the zenith, \(\theta = \pi v\). Aiming at the sky means drawing directions in proportion to
+        how bright they are, so Raymond builds a table of the panorama's luminance per cell, times \(\sin\theta\),
+        since cells near the poles cover less of the sky:</p>
+
+    $$P(u, v) \propto Y(u, v)\,\sin(\pi v) .$$
+
+    <p>Picking a row, then a cell in it, by binary search through the cumulative sums, gives a density over the map;
+        changing variables from \((u, v)\) to solid angle, where \(\mathrm{d}\omega = 2\pi^2\sin\theta\,\mathrm{d}u\,\mathrm{d}v\), gives</p>
+
+    $$p(\omega) = \frac{P(u, v)}{2\pi^2\sin\theta} .$$
+
+    <p>A sun in the photograph, thousands of times brighter than the rest, then gets found on nearly every bounce.</p>
+
+    <h2 id="fog">10. Fog</h2>
+
+    <p>In fog, light can scatter anywhere along a ray, not just at surfaces. In a medium of density \(\sigma\)
+        (chance of scattering per unit length), the fraction of light getting through a distance \(t\) follows the
+        Beer–Lambert law:</p>
+
+    $$T(t) = e^{-\sigma t} .$$
+
+    <p>Raymond draws where a ray first meets a particle from exactly that distribution (<em>free-flight sampling</em>,
+        <code>scatter_in_volumes()</code>):</p>
+
+    $$t = -\frac{\ln(1-\xi)}{\sigma}, \qquad p(t) = \sigma e^{-\sigma t} .$$
+
+    <p>If that's before the next surface, the ray scatters there. Because the density and the attenuation are the same
+        exponential, the weight is exactly the fog's colour (its albedo): again, no noise from the choice. Where it
+        scatters, the new direction comes from the Henyey–Greenstein phase function, with \(g\) from \(-1\) (back the
+        way it came) through \(0\) (evenly) to \(1\) (straight on):</p>
+
+    $$p_{HG}(\cos\theta) = \frac{1}{4\pi}\,\frac{1-g^2}{\left(1+g^2-2g\cos\theta\right)^{3/2}},$$
+
+    <p>sampled exactly by</p>
+
+    $$\cos\theta = \frac{1}{2g}\left(1 + g^2 - \left(\frac{1-g^2}{1+g-2g\xi}\right)^2\right) .$$
+
+    <p>Fog in Raymond scatters forwards (\(g \approx 0.6\)), which is why sunbeams glow most looking towards the
+        window. Shadow rays from surfaces and from the fog itself multiply by \(T\) for every volume they cross.</p>
+
+    <h2 id="caustics">11. Caustics</h2>
+
+    <p>The bright, sharp patterns light makes after passing through glass or water, or off a mirror, are
+        <em>caustics</em>, and they defeat everything so far. To see a caustic on the floor, a path from the camera
+        must hit the floor, bounce into the glass at just the right angle, refract twice, and arrive exactly at a
+        small lamp. Aiming at the lamp doesn't help, because the glass is in the way and bends the ray off it; a
+        perfect point light could never be found at all. Raymond attacks caustics from the other end, from the
+        lights.</p>
+
+    <h3>Light tracing</h3>
+
+    <p>Each frame, alongside the camera paths, Raymond sends <em>photons</em> out of the lights (<code>light_trace</code>),
+        chosen by power. Each carries power \(\Phi\) and follows mirrors and glass, until it lands on some other
+        surface. Then it is connected straight to the camera (<code>splat()</code>) and adds to the pixel that sees
+        that point:</p>
+
+    $$\Delta L_{\text{pixel}} = \frac{\Phi\; f(\omega_{\text{photon}},\omega_{\text{camera}})\,\cos\theta_s}{d^2\,A_{\text{pixel}}\,\cos^3\theta_c},$$
+
+    <p>where \(d\) is the distance to the camera, \(\theta_s\) the angle at the surface, \(\theta_c\) the angle off the
+        middle of the view, and \(A_{\text{pixel}}\) a pixel's area on a screen at unit distance: the camera's
+        <em>importance</em>, the exact counterpart of radiance going the other way. The camera paths leave out
+        precisely the paths light tracing counts (camera, then a surface, then only mirrors and glass, then a light),
+        so nothing is counted twice.</p>
+
+    <p>Photons are aimed. A photon that misses every mirror and glass object can't make a caustic, so a lamp's photons
+        are aimed into the cone of a sphere round one of those objects, chosen by the solid angle it covers. Where
+        cones overlap, a direction could have come from any of them, so the density is the mixture of all of them; it
+        simplifies to the number of cones the direction lies in, \(k\), over their total:</p>
+
+    $$p(\omega) = \frac{k(\omega)}{\sum_j 2\pi\left(1-\cos\theta_j\right)} .$$
+
+    <p>Many photons add to the same pixel at once on the GPU, which can only add whole numbers atomically. Each value is
+        stored in units of \(2^{-16}\), rounded up or down at random in proportion,</p>
+
+    $$\operatorname{E}\!\left[\lfloor x + \xi \rfloor\right] = x,$$
+
+    <p>so even photons far fainter than one unit add up to the right total on average. (Rounding to nearest instead
+        once made a dim scene 12% too dark.)</p>
+
+    <h3>Photon mapping</h3>
+
+    <p>Light tracing can't reach the camera through glass: a caustic on the floor of a pool, seen through the water,
+        would need the connection to refract too. For those, the photons are also stored where they land, in a grid
+        hashed by position (<em>photon mapping</em>, Jensen 1996). A camera path that has passed through mirrors and
+        glass and reaches another surface then gathers the photons within a radius \(r\) of the point it hit:</p>
+
+    $$L \approx \frac{1}{\pi r^2}\sum\limits_{p} f(\omega_p,\omega_o)\,\Phi_p ,$$
+
+    <p>summing over the photons \(p\) that landed within \(r\) of \(\mathbf{x}\), each with power \(\Phi_p\), arriving from
+        \(\omega_p\). That's a density estimate, slightly blurred by \(r\). <em>Progressive</em> photon mapping (Hachisuka, 2008)
+        shrinks the radius as frames go by, \(r_k = r_0\,k^{-1/6}\) (so \(r^2\) falls as \(k^{-1/3}\)), slowly enough
+        that more and more photons still land inside it. The blur and the noise both vanish together, and the average
+        converges to the right answer.</p>
+
+    <h2 id="denoising">12. Denoising</h2>
+
+    <p>A young image is noisy. The denoiser smooths it while keeping edges, by averaging each pixel with neighbours
+        that see the same kind of surface, and it backs off as the real samples take over. It works on <em>light</em>
+        rather than colour: each pixel's average is divided by the colour of the surface it sees (an albedo guide the
+        path tracer records), so textures aren't smeared, and multiplied back at the end.</p>
+
+    <p>Each pixel's noise comes from its own samples. With \(n\) samples of luminance \(l\), the variance of their
+        mean is</p>
+
+    $$\operatorname{Var}[\bar l] \approx \frac{1}{n-1}\left(\frac{1}{n}\sum\limits_{k=1}^{n} l_k^2 - \bar l^{\,2}\right),$$
+
+    <p>which is why each pixel's sum of squared luminances is kept alongside its sum of colours.</p>
+
+    <p>Then five passes of an <em>à-trous</em> ("with holes") wavelet filter (Dammertz et al., 2010) each blend a
+        \(5 \times 5\) grid of neighbours spaced \(s = 1, 2, 4, 8, 16\) pixels apart, so together they reach 62 pixels each way
+        for the cost of 125 lookups. The kernel is the B-spline \(h = (\tfrac1{16}, \tfrac14, \tfrac38, \tfrac14, \tfrac1{16})\), and each
+        neighbour \(q\) of pixel \(p\) is weighted by how alike they are:</p>
+
+    $$w_{pq} = h_x h_y \cdot \max(0, \mathbf{n}_p\cdot\mathbf{n}_q)^{64} \cdot \exp\!\left(-\frac{|z_p - z_q|}{0.02\,z_p\,s}\right) \cdot \exp\!\left(-\frac{|l_p - l_q|}{4\sigma_p}\right) .$$
+
+    <p>The normals \(\mathbf{n}\) and distances \(z\) stop it blurring across edges; the last factor stops it blurring
+        across real changes of brightness, relative to the noise \(\sigma_p\) expected there. As samples build up,
+        \(\sigma_p\) shrinks, the weights narrow, and the filter fades into the plain average. The variance is carried
+        through each pass too, as \(\sum w^2\operatorname{Var}\big/\left(\sum w\right)^2\), so later passes know how much noise is left.</p>
+
+    <h2 id="display">13. From numbers to colours</h2>
+
+    <p>The average is radiance: linear light, with no upper limit (a lamp might be 50, a wall 0.3). Turning it into a
+        screen colour takes three steps (<code>fragment()</code> in the display shader):</p>
+
+    <ol>
+        <li><strong>Exposure:</strong> multiply by \(2^{\text{EV}}\), as a camera does.</li>
+        <li><strong>Tone mapping:</strong> squeeze unlimited brightness into 0 to 1 with a film-like curve, Narkowicz's
+            fit to ACES:
+            $$T(x) = \frac{x\,(2.51x + 0.03)}{x\,(2.43x + 0.59) + 0.14} .$$
+            Highlights roll off gently instead of clipping to flat white.</li>
+        <li><strong>sRGB encoding:</strong> screens expect values spaced for the eye, not linear light:
+            $$C = \begin{cases} 12.92\,x & x \le 0.0031308 \\ 1.055\,x^{1/2.4} - 0.055 & \text{otherwise.} \end{cases}$$</li>
+    </ol>
+
+    <p>"Tame fireflies" clamps each sample's brightest channel at 10 before it's added. That trades a little accuracy
+        for removing the rare enormous samples (a path that found a lamp by a lucky bounce) that would otherwise take
+        thousands of samples to average away.</p>
+
+    <h2 id="gpu">14. On the GPU</h2>
+
+    <p>All of this runs in WebGPU compute shaders, written in WGSL. Each pixel is one GPU thread, in workgroups of
+        \(8 \times 8\), and each frame does, in order:</p>
+
+    <div class="table">
+        <table>
+            <thead>
+                <tr><th>Pass</th><th>What it does</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>main</code></td><td>Traces the frame's paths for every pixel and adds them to the running sums,
+                    with the denoiser's guides (albedo, normal and distance).</td></tr>
+                <tr><td><code>light_trace</code></td><td>Sends photons from the lights, splatting caustics and storing photons
+                    (only with mirrors or glass in the scene).</td></tr>
+                <tr><td><code>resolve_splats</code></td><td>Adds the frame's splats into the sums.</td></tr>
+                <tr><td><code>photon_gather</code></td><td>Gathers photons for what's seen through glass.</td></tr>
+                <tr><td><code>prepare</code>, <code>atrous</code> ×5, <code>compose</code></td><td>The denoiser.</td></tr>
+                <tr><td><code>fragment</code></td><td>Exposure, tone mapping and sRGB, drawn to the screen.</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <p>The scene is flattened into arrays the shader reads directly: 64 bytes per primitive, 96 per material, 32 per BVH
+        node. Anything that changes the image (the camera, the scene, the bounce limit) is noticed by comparing the
+        uniforms with last frame's, and restarts the average. The shader is compiled separately for each combination of
+        features a scene uses (fog, textures, a panorama, dispersion), with the rest left out entirely: even code that
+        never runs slowed the rest down by up to 38%.</p>
+
+    <p>Random numbers come from a PCG hash, seeded by pixel and sample number, so the same scene renders identically
+        every time. Every path is independent of every other, which is what makes path tracing such a natural fit for a
+        GPU: millions of pixels, each doing the same simple loop, at once.</p>
+
+    <h2 id="reading">Further reading</h2>
+
+    <ul>
+        <li>Matt Pharr, Wenzel Jakob and Greg Humphreys, <a href="https://pbr-book.org/"><em>Physically Based Rendering</em></a>,
+            free online: the reference for nearly everything here.</li>
+        <li>James Kajiya, "The rendering equation", SIGGRAPH 1986.</li>
+        <li>Eric Veach, <em>Robust Monte Carlo Methods for Light Transport Simulation</em>, PhD thesis, 1997: multiple
+            importance sampling, and much more.</li>
+        <li>Bruce Walter et al., "Microfacet models for refraction through rough surfaces", EGSR 2007: GGX.</li>
+        <li>Henrik Wann Jensen, "Global illumination using photon maps", 1996; Toshiya Hachisuka et al., "Progressive
+            photon mapping", SIGGRAPH Asia 2008.</li>
+        <li>Holger Dammertz et al., "Edge-avoiding À-trous wavelet transform for fast global illumination filtering",
+            HPG 2010.</li>
+        <li>Peter Shirley, <a href="https://raytracing.github.io/"><em>Ray Tracing in One Weekend</em></a>: the gentlest
+            way to write your own.</li>
+    </ul>
+
+    <p class="back"><a href="./">← Back to Raymond</a></p>
+
+</body>
+
+</html>
