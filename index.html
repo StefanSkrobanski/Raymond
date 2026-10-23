@@ -99,8 +99,51 @@
             pointer-events: none;
         }
 
-        #hud strong {
-            margin-right: 6px;
+        /* The scene picker: the scene's name, which opens the list. */
+        #hud .picker {
+            position: relative;
+            display: block;
+            pointer-events: auto;
+        }
+
+        #hud .picker::after {
+            content: "";
+            position: absolute;
+            right: 4px;
+            top: 50%;
+            margin-top: -2px;
+            border: 5px solid transparent;
+            border-top-color: currentColor;
+            border-bottom: 0;
+            pointer-events: none;
+        }
+
+        #scene {
+            appearance: none;
+            -webkit-appearance: none;
+            min-height: 30px;
+            max-width: calc(100vw - 48px);
+            margin: 0;
+            padding: 0 22px 0 0;
+            border: 0;
+            background: transparent;
+            color: var(--text);
+            font: inherit;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        #scene:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+            border-radius: 4px;
+        }
+
+        #stats {
+            display: block;
+            font-size: 12px;
+            opacity: 0.8;
         }
 
         #progress {
@@ -350,7 +393,8 @@
     <canvas id="view"></canvas>
 
     <div id="hud" aria-live="off">
-        <strong id="scene-name">Raymond</strong><span id="stats">Starting…</span>
+        <span class="picker"><select id="scene" aria-label="Scene"></select></span>
+        <span id="stats">Starting…</span>
         <div id="progress"><div></div></div>
     </div>
 
@@ -375,7 +419,6 @@
             <button id="settings-close" type="button" aria-label="Close settings">✕</button>
         </header>
 
-        <label>Scene <select id="scene"></select></label>
         <label>View <select id="view-mode"></select></label>
 
         <label>Bounces <output id="bounces-value"></output>

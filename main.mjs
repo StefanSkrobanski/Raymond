@@ -237,7 +237,7 @@ function loadScene({ changed = false } = {}) {
     if (changed)
         settings.bounces = built.bounces ?? DEFAULT_SETTINGS.bounces;
 
-    $("scene-name").textContent = demo.name;
+    $("scene").value = demo.id;
     applySettings();
 }
 
@@ -302,8 +302,8 @@ function bindSlider(id, range, set) {
     });
 }
 
-// The scene picker, in groups by category; bindSelect adds no options of
-// its own, just keeps the setting in step.
+// The scene picker, top left, in groups by category; bindSelect adds no
+// options of its own, just keeps the setting in step.
 for (const category of new Set(SCENES.map((s) => s.category))) {
     const group = document.createElement("optgroup");
     group.label = category;

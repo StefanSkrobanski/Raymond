@@ -658,7 +658,7 @@ test("the app accumulates samples and reports them", async () => {
 
     assert.equal(await page.isHidden("#error"), true);
     assert.match(await page.textContent("#stats"), /^\d+ \/ 4096 samples · 480×320/);
-    assert.equal(await page.textContent("#scene-name"), "Cornell box");
+    assert.equal(await page.inputValue("#scene"), "cornell");
 
     // The image is on screen, and isn't black.
     const shot = decodePng(await page.screenshot({ timeout: SLOW_FRAME_MS }));
@@ -741,14 +741,18 @@ test("moving the camera shows a fast preview, then the full image once it stops"
     await context.close();
 });
 
-test("the settings panel changes the scene, view and resolution, and remembers them", async () => {
+test("the scene picker on the page and the settings panel change the scene, view and resolution, and remember them", async () => {
 
     const { page, errors, context } = await open("index.html");
     await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: SLOW_FRAME_MS });
 
-    await page.click("#settings-button", { timeout: SLOW_FRAME_MS });
+    // The picker is on the page, not in the panel.
+    assert.ok(await page.isVisible("#scene"), "the picker shows without opening settings");
+    assert.equal(await page.locator("#settings #scene").count(), 0, "and isn't in the panel");
     await page.selectOption("#scene", "spheres");
-    await page.waitForFunction(() => document.getElementById("scene-name").textContent == "Sphere field");
+    await page.waitForFunction(() => window.raymond.renderer.scene.objects.length > 20);
+
+    await page.click("#settings-button", { timeout: SLOW_FRAME_MS });
 
     await page.selectOption("#view-mode", "normal");
     await page.selectOption("#resolution", "0.5");
@@ -762,7 +766,7 @@ test("the settings panel changes the scene, view and resolution, and remembers t
     // Reloading keeps them.
     await page.reload();
     await page.waitForFunction(() => window.raymond?.renderer.samples >= 1, null, { timeout: SLOW_FRAME_MS });
-    assert.equal(await page.textContent("#scene-name"), "Sphere field");
+    assert.equal(await page.inputValue("#scene"), "spheres");
     assert.equal(await page.inputValue("#view-mode"), "normal");
 
     assert.deepEqual(errors, []);
