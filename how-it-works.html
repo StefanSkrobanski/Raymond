@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <!-- Built from tools/how-it-works.src.html by tools/build-how-it-works.py: edit that, not this. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>How Raymond works</title>
+    <meta name="description" content="A deep dive into how Raymond, a WebGPU path tracer, turns a scene into a picture: the maths of light, Monte Carlo, materials, caustics and denoising.">
+    <link rel="icon" type="image/png" href="icon-192.png">
+
+    <script>
+        // The theme, as the app stores it, before the first paint.
+        try {
+            const stored = JSON.parse(localStorage.getItem("raymond-settings") || "{}").theme;
+            const dark = stored === "dark" ||
+                (stored !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+            document.documentElement.dataset.theme = dark ? "dark" : "light";
+        }
+        catch {
+            document.documentElement.dataset.theme =
+                matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+    </script>
+
+    <style>
+        :root {
+            color-scheme: light;
+            --text: #1a1c20;
+            --muted: #5a606b;
+            --background: #fbfaf7;
+            --panel: #f1eee7;
+            --border: rgba(0, 0, 0, 0.14);
+            --accent: #c2410c;
+            --figure: #33363d;
+        }
+
+        :root[data-theme="dark"] {
+            color-scheme: dark;
+            --text: #e6e8ee;
+            --muted: #9ba2ae;
+            --background: #0f1116;
+            --panel: #181b23;
+            --border: rgba(255, 255, 255, 0.14);
+            --accent: #ff8a4c;
+            --figure: #c9cdd6;
+        }
+
+        html {
+            background: var(--background);
+            color: var(--text);
+        }
+
+        body {
+            max-width: 44rem;
+            margin: 0 auto;
+            padding: calc(24px + env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+                     calc(48px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+            font: 17px/1.62 Charter, "Bitstream Charter", "Iowan Old Style", Georgia, serif;
+            overflow-wrap: break-word;
+        }
+
+        h1, h2, h3, nav, .back, figcaption, table {
+            font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        }
+
+        h1 {
+            font-size: 2.1rem;
+            line-height: 1.15;
+            margin: 0.4em 0 0.2em;
+        }
+
+        .subtitle {
+            color: var(--muted);
+            font-size: 1.1rem;
+            margin-top: 0;
+        }
+
+        h2 {
+            font-size: 1.4rem;
+            margin: 2.2em 0 0.4em;
+            padding-top: 0.6em;
+            border-top: 1px solid var(--border);
+        }
+
+        h3 {
+            font-size: 1.08rem;
+            margin: 1.6em 0 0.3em;
+        }
+
+        a {
+            color: var(--accent);
+        }
+
+        .back {
+            font-size: 0.95rem;
+        }
+
+        nav {
+            background: var(--panel);
+            border-radius: 10px;
+            padding: 0.8em 1.2em;
+            font-size: 0.95rem;
+        }
+
+        nav ol {
+            margin: 0.3em 0;
+            padding-left: 1.4em;
+            columns: 2;
+            column-gap: 2em;
+        }
+
+        @media (max-width: 34rem) {
+            nav ol {
+                columns: 1;
+            }
+        }
+
+        code {
+            font: 0.86em/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+            background: var(--panel);
+            padding: 0.1em 0.3em;
+            border-radius: 4px;
+        }
+
+        /* Equations on their own lines scroll sideways on a narrow screen
+           rather than spilling out of the page. */
+        .equation {
+            overflow-x: auto;
+            overflow-y: hidden;
+            margin: 0.9em 0;
+            padding: 0.2em 0;
+        }
+
+        math {
+            font-size: 1.06em;
+        }
+
+        math[display="block"] {
+            margin: 0;
+        }
+
+        .note {
+            background: var(--panel);
+            border-left: 3px solid var(--accent);
+            border-radius: 0 8px 8px 0;
+            padding: 0.6em 1em;
+            margin: 1.2em 0;
+        }
+
+        .note p {
+            margin: 0.3em 0;
+        }
+
+        figure {
+            margin: 1.6em 0;
+            text-align: center;
+        }
+
+        figure svg {
+            max-width: 100%;
+            height: auto;
+            color: var(--figure);
+        }
+
+        figure svg .accent {
+            color: var(--accent);
+        }
+
+        figcaption {
+            color: var(--muted);
+            font-size: 0.88rem;
+            margin-top: 0.4em;
+        }
+
+        table {
+            border-collapse: collapse;
+            font-size: 0.9rem;
+            margin: 1em 0;
+            width: 100%;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 0.35em 0.6em;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+
+        .table {
+            overflow-x: auto;
+        }
+    </style>
+</head>
+
+<body>
+
+    <p class="back"><a href="./">← Back to Raymond</a></p>
+
+    <h1>How Raymond works</h1>
+    <p class="subtitle">A deep dive into path tracing: how a few hundred lines of maths, run billions of times on the
+        GPU, turn a description of a scene into a picture lit as light really lights it.</p>
+
+    <nav aria-label="Contents">
+        <strong>Contents</strong>
+        <ol>
+            <li><a href="#rays">From pixels to rays</a></li>
+            <li><a href="#light">What a pixel measures</a></li>
+            <li><a href="#monte-carlo">Monte Carlo</a></li>
+            <li><a href="#paths">Path tracing</a></li>
+            <li><a href="#hits">Finding what a ray hits</a></li>
+            <li><a href="#materials">Materials</a></li>
+            <li><a href="#lights">Aiming at the lights</a></li>
+            <li><a href="#mis">Multiple importance sampling</a></li>
+            <li><a href="#sky">Skies and environment maps</a></li>
+            <li><a href="#fog">Fog</a></li>
+            <li><a href="#caustics">Caustics</a></li>
+            <li><a href="#denoising">Denoising</a></li>
+            <li><a href="#display">From numbers to colours</a></li>
+            <li><a href="#gpu">On the GPU</a></li>
+            <li><a href="#reading">Further reading</a></li>
+        </ol>
+    </nav>
+
+    <p>Raymond is a <em>path tracer</em>. It doesn't paint shadows, reflections or soft light on: it follows light
+        itself, as rays bouncing round the scene, and lets those effects appear on their own. Every term below is
+        something the code actually computes; where it helps, the name of the function in
+        <a href="https://github.com/StefanSkrobanski/Raymond/blob/main/src/shaders.mjs"><code>src/shaders.mjs</code></a>
+        is given, so you can read the real thing.</p>
+
+    <h2 id="rays">1. From pixels to rays</h2>
+
+    <p>A ray is a starting point and a direction: the points along it are</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>&#x1D42B;</mi><mo stretchy="false">&#x00028;</mo><mi>t</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0003D;</mo><mi>&#x1D428;</mi><mo>&#x0002B;</mo><mi>t</mi><mspace width="0.167em" /><mi>&#x1D41D;</mi><mo>&#x0002C;</mo><mspace width="2em" /><mi>t</mi><mo>&#x0003E;</mo><mn>0</mn><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>The camera has a position <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D41C;</mi></mrow></math> and three unit vectors: right <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D42E;</mi></mrow></math>, up <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D42F;</mi></mrow></math> and
+        forward <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D430;</mi></mrow></math> (it looks down its own <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mo>&#x02212;</mo><mi>z</mi></mrow></math> axis, as in OpenGL, so <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D430;</mi></mrow></math> points into the
+        scene). For a field of view <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x003C6;</mi></mrow></math>, and a point <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mo stretchy="false">&#x00028;</mo><msub><mi>p</mi><mi>x</mi></msub><mo>&#x0002C;</mo><msub><mi>p</mi><mi>y</mi></msub><mo stretchy="false">&#x00029;</mo></mrow></math> in an image <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>W</mi><mo>&#x000D7;</mo><mi>H</mi></mrow></math> pixels across,
+        the point on the screen in coordinates from <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mo>&#x02212;</mo><mn>1</mn></mrow></math> to <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mn>1</mn></mrow></math> is</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>x</mi><mo>&#x0003D;</mo><mfrac><mrow><mn>2</mn><msub><mi>p</mi><mi>x</mi></msub></mrow><mrow><mi>W</mi></mrow></mfrac><mo>&#x02212;</mo><mn>1</mn><mo>&#x0002C;</mo><mspace width="2em" /><mi>y</mi><mo>&#x0003D;</mo><mn>1</mn><mo>&#x02212;</mo><mfrac><mrow><mn>2</mn><msub><mi>p</mi><mi>y</mi></msub></mrow><mrow><mi>H</mi></mrow></mfrac><mo>&#x0002C;</mo></mrow></math></div>
+
+    <p>and the ray through it (<code>camera_ray()</code>) is</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>&#x1D41D;</mi><mo>&#x0003D;</mo><mo>normalize</mo><mspace width="negativethinmathspace" /><mrow><mo stretchy="true" fence="true" form="prefix">&#x00028;</mo><mi>&#x1D430;</mi><mo>&#x0002B;</mo><mi>x</mi><mspace width="0.167em" /><mi>a</mi><mi>tan</mi><mstyle displaystyle="false" scriptlevel="0"><mfrac><mrow><mi>&#x003C6;</mi></mrow><mrow><mn>2</mn></mrow></mfrac></mstyle><mspace width="0.167em" /><mi>&#x1D42E;</mi><mo>&#x0002B;</mo><mi>y</mi><mi>tan</mi><mstyle displaystyle="false" scriptlevel="0"><mfrac><mrow><mi>&#x003C6;</mi></mrow><mrow><mn>2</mn></mrow></mfrac></mstyle><mspace width="0.167em" /><mi>&#x1D42F;</mi><mo stretchy="true" fence="true" form="postfix">&#x00029;</mo></mrow><mo>&#x0002C;</mo></mrow></math></div>
+
+    <p>where <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>a</mi><mo>&#x0003D;</mo><mi>W</mi><mo>&#x0002F;</mo><mi>H</mi></mrow></math> is the aspect ratio. Each sample aims at a random point inside its pixel,
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mo stretchy="false">&#x00028;</mo><msub><mi>p</mi><mi>x</mi></msub><mo>&#x0002C;</mo><msub><mi>p</mi><mi>y</mi></msub><mo stretchy="false">&#x00029;</mo><mo>&#x0003D;</mo><mo stretchy="false">&#x00028;</mo><mi>i</mi><mo>&#x0002B;</mo><msub><mi>&#x003BE;</mi><mn>1</mn></msub><mo>&#x0002C;</mo><mi>j</mi><mo>&#x0002B;</mo><msub><mi>&#x003BE;</mi><mn>2</mn></msub><mo stretchy="false">&#x00029;</mo></mrow></math> with <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x003BE;</mi></mrow></math> uniform on <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mo stretchy="false">[</mo><mn>0</mn><mo>&#x0002C;</mo><mn>1</mn><mo stretchy="false">&#x00029;</mo></mrow></math>, so the average over many samples
+        is the average colour <em>across</em> the pixel: edges come out smooth rather than jagged, for free.</p>
+
+    <figure>
+        <svg viewBox="0 0 560 220" width="560" height="220" role="img" aria-label="Rays from the camera through the pixels of the screen into the scene">
+            <g fill="none" stroke="currentColor" stroke-width="1.5">
+                <circle cx="50" cy="110" r="5" fill="currentColor" />
+                <rect x="200" y="40" width="20" height="140" />
+                <line x1="200" y1="75" x2="220" y2="75" />
+                <line x1="200" y1="110" x2="220" y2="110" />
+                <line x1="200" y1="145" x2="220" y2="145" />
+                <circle cx="440" cy="80" r="45" />
+                <rect x="380" y="160" width="150" height="10" />
+            </g>
+            <g class="accent" stroke="currentColor" stroke-width="1.5" fill="none">
+                <line x1="50" y1="110" x2="410" y2="45" />
+                <line x1="50" y1="110" x2="400" y2="98" />
+                <line x1="50" y1="110" x2="450" y2="160" />
+            </g>
+            <g fill="currentColor" font-family="system-ui, sans-serif" font-size="13">
+                <text x="30" y="140">camera</text>
+                <text x="180" y="200">pixels</text>
+                <text x="420" y="22">scene</text>
+            </g>
+        </svg>
+        <figcaption>One ray from the camera through each pixel; where it lands decides what that pixel sees.</figcaption>
+    </figure>
+
+    <h3>Depth of field</h3>
+
+    <p>A real lens has a size. With an aperture of radius <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>R</mi></mrow></math> focused at distance <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>f</mi></mrow></math>, Raymond starts each ray at a
+        random point on the lens, <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D428;</mi><mo>&#x0003D;</mo><mi>&#x1D41C;</mi><mo>&#x0002B;</mo><mi>R</mi><mo stretchy="false">&#x00028;</mo><mi>s</mi><mspace width="0.167em" /><mi>&#x1D42E;</mi><mo>&#x0002B;</mo><mi>t</mi><mspace width="0.167em" /><mi>&#x1D42F;</mi><mo stretchy="false">&#x00029;</mo></mrow></math> with <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mo stretchy="false">&#x00028;</mo><mi>s</mi><mo>&#x0002C;</mo><mi>t</mi><mo stretchy="false">&#x00029;</mo></mrow></math>
+        drawn evenly over the unit disc, and aims it at the point the pinhole ray would reach on the plane of focus:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><msub><mi>&#x1D429;</mi><mi>f</mi></msub><mo>&#x0003D;</mo><mi>&#x1D41C;</mi><mo>&#x0002B;</mo><mfrac><mrow><mi>f</mi></mrow><mrow><mi>&#x1D41D;</mi><mo>&#x000B7;</mo><mi>&#x1D430;</mi></mrow></mfrac><mspace width="0.167em" /><mi>&#x1D41D;</mi><mo>&#x0002C;</mo><mspace width="2em" /><msup><mi>&#x1D41D;</mi><mi>&#x02032;</mi></msup><mo>&#x0003D;</mo><mo>normalize</mo><mo stretchy="false">&#x00028;</mo><msub><mi>&#x1D429;</mi><mi>f</mi></msub><mo>&#x02212;</mo><mi>&#x1D428;</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>Everything on that plane lands on the same pixel whichever part of the lens the ray came through, so it's
+        sharp; anything nearer or further spreads into a blur. The disc points come from Shirley and Chiu's
+        <em>concentric</em> mapping, which keeps neighbouring random numbers neighbours on the disc.</p>
+
+    <h2 id="light">2. What a pixel measures</h2>
+
+    <p>The quantity light carries along a ray is <em>radiance</em>, <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>L</mi></mrow></math>: power per unit area, per unit solid angle.
+        It's what a camera sensor responds to, and it has the useful property of staying constant along a ray through
+        empty space. A pixel's value is the radiance arriving along its rays, averaged over the pixel and the lens.</p>
+
+    <p>Radiance leaving a point <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D431;</mi></mrow></math> in direction <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>&#x003C9;</mi><mi>o</mi></msub></mrow></math> is what the surface gives off itself, plus all
+        the light arriving from every direction that it reflects towards <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>&#x003C9;</mi><mi>o</mi></msub></mrow></math>. That is the <em>rendering
+        equation</em> (Kajiya, 1986):</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><msub><mi>L</mi><mi>o</mi></msub><mo stretchy="false">&#x00028;</mo><mi>&#x1D431;</mi><mo>&#x0002C;</mo><msub><mi>&#x003C9;</mi><mi>o</mi></msub><mo stretchy="false">&#x00029;</mo><mo>&#x0003D;</mo><msub><mi>L</mi><mi>e</mi></msub><mo stretchy="false">&#x00028;</mo><mi>&#x1D431;</mi><mo>&#x0002C;</mo><msub><mi>&#x003C9;</mi><mi>o</mi></msub><mo stretchy="false">&#x00029;</mo><mo>&#x0002B;</mo><msub><mo>&#x0222B;</mo><mrow><mi>&#x003A9;</mi></mrow></msub><mi>f</mi><mo stretchy="false">&#x00028;</mo><mi>&#x1D431;</mi><mo>&#x0002C;</mo><msub><mi>&#x003C9;</mi><mi>i</mi></msub><mo>&#x0002C;</mo><msub><mi>&#x003C9;</mi><mi>o</mi></msub><mo stretchy="false">&#x00029;</mo><mspace width="0.167em" /><msub><mi>L</mi><mi>i</mi></msub><mo stretchy="false">&#x00028;</mo><mi>&#x1D431;</mi><mo>&#x0002C;</mo><msub><mi>&#x003C9;</mi><mi>i</mi></msub><mo stretchy="false">&#x00029;</mo><mspace width="0.167em" /><mi>cos</mi><msub><mi>&#x003B8;</mi><mi>i</mi></msub><mspace width="0.167em" /><mi>&#x00064;</mi><msub><mi>&#x003C9;</mi><mi>i</mi></msub><mo>&#x0002E;</mo></mrow></math></div>
+
+    <ul>
+        <li><math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>L</mi><mi>e</mi></msub></mrow></math> is emitted light: zero except on lamps and glowing materials.</li>
+        <li><math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x003A9;</mi></mrow></math> is the hemisphere of directions above the surface, and <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x00064;</mi><msub><mi>&#x003C9;</mi><mi>i</mi></msub></mrow></math> a small patch of
+            directions.</li>
+        <li><math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>f</mi></mrow></math> is the <em>BSDF</em>: what fraction of light arriving from <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>&#x003C9;</mi><mi>i</mi></msub></mrow></math> leaves towards
+            <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>&#x003C9;</mi><mi>o</mi></msub></mrow></math>. It is what makes paint look different from chrome or glass.</li>
+        <li><math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>cos</mi><msub><mi>&#x003B8;</mi><mi>i</mi></msub><mo>&#x0003D;</mo><mi>&#x1D427;</mi><mo>&#x000B7;</mo><msub><mi>&#x003C9;</mi><mi>i</mi></msub></mrow></math>: light arriving at a slant spreads over more area, so it
+            counts for less.</li>
+        <li><math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>L</mi><mi>i</mi></msub><mo stretchy="false">&#x00028;</mo><mi>&#x1D431;</mi><mo>&#x0002C;</mo><msub><mi>&#x003C9;</mi><mi>i</mi></msub><mo stretchy="false">&#x00029;</mo></mrow></math> is the radiance arriving, which is the radiance <em>leaving</em> whatever
+            surface the ray from <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D431;</mi></mrow></math> towards <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>&#x003C9;</mi><mi>i</mi></msub></mrow></math> hits first. So the unknown <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>L</mi></mrow></math> appears on both
+            sides: light bounces.</li>
+    </ul>
+
+    <figure>
+        <svg viewBox="0 0 520 220" width="520" height="220" role="img" aria-label="Light arriving at a point from every direction over a hemisphere, and some of it leaving towards the camera">
+            <g fill="none" stroke="currentColor" stroke-width="1.5">
+                <line x1="60" y1="180" x2="460" y2="180" />
+                <path d="M120 180 A140 140 0 0 1 400 180" stroke-dasharray="5 5" />
+                <line x1="260" y1="180" x2="260" y2="90" />
+                <path d="M255 96 L260 88 L265 96" />
+            </g>
+            <g class="accent" fill="none" stroke="currentColor" stroke-width="1.5">
+                <line x1="160" y1="80" x2="255" y2="176" />
+                <line x1="215" y1="58" x2="258" y2="175" />
+                <line x1="330" y1="60" x2="262" y2="175" />
+                <line x1="250" y1="176" x2="140" y2="130" />
+                <path d="M244 166 L256 177 L240 176" />
+                <path d="M150 128 L139 129 L146 137" />
+            </g>
+            <g fill="currentColor" font-family="system-ui, sans-serif" font-size="13">
+                <text x="266" y="96">n</text>
+                <text x="120" y="70">incoming L</text>
+                <text x="70" y="128">to camera</text>
+                <text x="250" y="200">x</text>
+                <text x="390" y="110">Ω</text>
+            </g>
+        </svg>
+        <figcaption>The light leaving <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D431;</mi></mrow></math> towards the camera gathers light arriving from the whole hemisphere
+            <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x003A9;</mi></mrow></math> above it, weighted by the material and the cosine.</figcaption>
+    </figure>
+
+    <h2 id="monte-carlo">3. Monte Carlo</h2>
+
+    <p>The rendering equation has no formula for an answer: the integral is over every direction, and every
+        direction's <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>L</mi><mi>i</mi></msub></mrow></math> is another such integral, and so on, bounce after bounce. Raymond estimates it by
+        <em>Monte Carlo</em> integration. To estimate <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>I</mi><mo>&#x0003D;</mo><mo>&#x0222B;</mo><mi>f</mi><mo stretchy="false">&#x00028;</mo><mi>x</mi><mo stretchy="false">&#x00029;</mo><mspace width="0.167em" /><mi>&#x00064;</mi><mi>x</mi></mrow></math>, draw random points <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>X</mi><mi>k</mi></msub></mrow></math> from
+        any probability density <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>p</mi></mrow></math> and average:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>&#x027E8;</mi><mi>I</mi><msub><mi>&#x027E9;</mi><mi>N</mi></msub><mo>&#x0003D;</mo><mfrac><mrow><mn>1</mn></mrow><mrow><mi>N</mi></mrow></mfrac><munderover><mo>&#x02211;</mo><mrow><mi>k</mi><mo>&#x0003D;</mo><mn>1</mn></mrow><mrow><mi>N</mi></mrow></munderover><mfrac><mrow><mi>f</mi><mo stretchy="false">&#x00028;</mo><msub><mi>X</mi><mi>k</mi></msub><mo stretchy="false">&#x00029;</mo></mrow><mrow><mi>p</mi><mo stretchy="false">&#x00028;</mo><msub><mi>X</mi><mi>k</mi></msub><mo stretchy="false">&#x00029;</mo></mrow></mfrac><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>This is <em>unbiased</em>: its expected value is exactly <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>I</mi></mrow></math>, whatever <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>N</mi></mrow></math>, provided <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>p</mi></mrow></math> is nonzero wherever
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>f</mi></mrow></math> is. Its error shrinks as</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><msub><mi>&#x003C3;</mi><mrow><mi>&#x027E8;</mi><mi>I</mi><msub><mi>&#x027E9;</mi><mi>N</mi></msub></mrow></msub><mo>&#x0003D;</mo><mfrac><mrow><mi>&#x003C3;</mi></mrow><mrow><msqrt><mrow><mi>N</mi></mrow></msqrt></mrow></mfrac><mo>&#x0002C;</mo></mrow></math></div>
+
+    <p>so four times the samples halve the noise. That's the grain in a young image, and why it clears quickly at
+        first, then slowly: going from 1 to 16 samples removes three quarters of the noise; from 1024 to 4096 only
+        half of what's left.</p>
+
+    <p>A <em>sample</em> in Raymond is one such random estimate of a pixel. The renderer adds each frame's samples to a
+        running sum per pixel, and shows the sum divided by the count: the running average <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x027E8;</mi><mi>I</mi><msub><mi>&#x027E9;</mi><mi>N</mi></msub></mrow></math>. The
+        progress bar is <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>N</mi></mrow></math> out of the sample limit.</p>
+
+    <h3>Importance sampling</h3>
+
+    <p>Any density <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>p</mi></mrow></math> gives the right answer on average, but not with the same noise. The variance vanishes
+        altogether if <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>p</mi></mrow></math> is proportional to <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>f</mi></mrow></math>, since then every <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>f</mi><mo stretchy="false">&#x00028;</mo><mi>X</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0002F;</mo><mi>p</mi><mo stretchy="false">&#x00028;</mo><mi>X</mi><mo stretchy="false">&#x00029;</mo></mrow></math> is the same number. We never know
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>f</mi></mrow></math> exactly (it's the answer), but we know parts of it, such as the material and where the lamps are, and
+        drawing directions in proportion to those is what most of the rest of this page is about. Each section says
+        which density it draws from; the estimator always divides by it, so nothing is biased.</p>
+
+    <h2 id="paths">4. Path tracing</h2>
+
+    <p>Apply Monte Carlo to the rendering equation with <em>one</em> sampled direction per bounce, and the recursion
+        turns into a single path: from the camera, hit a surface, pick a new direction <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>&#x003C9;</mi><mi>i</mi></msub></mrow></math> with density
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>p</mi><mo stretchy="false">&#x00028;</mo><msub><mi>&#x003C9;</mi><mi>i</mi></msub><mo stretchy="false">&#x00029;</mo></mrow></math>, and carry on from where that ray lands. Along the way the path keeps a <em>throughput</em>
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi mathvariant="bold-italic">&#x003B2;</mi></mrow></math>, starting at <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mn>1</mn></mrow></math>, of how much of the light found further on reaches the camera:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi mathvariant="bold-italic">&#x003B2;</mi><mo>&#x02190;</mo><mi mathvariant="bold-italic">&#x003B2;</mi><mspace width="0.167em" /><mfrac><mrow><mi>f</mi><mo stretchy="false">&#x00028;</mo><msub><mi>&#x003C9;</mi><mi>i</mi></msub><mo>&#x0002C;</mo><msub><mi>&#x003C9;</mi><mi>o</mi></msub><mo stretchy="false">&#x00029;</mo><mi>cos</mi><msub><mi>&#x003B8;</mi><mi>i</mi></msub></mrow><mrow><mi>p</mi><mo stretchy="false">&#x00028;</mo><msub><mi>&#x003C9;</mi><mi>i</mi></msub><mo stretchy="false">&#x00029;</mo></mrow></mfrac><mo>&#x0002C;</mo><mspace width="2em" /><mi>L</mi><mo>&#x02190;</mo><mi>L</mi><mo>&#x0002B;</mo><mi mathvariant="bold-italic">&#x003B2;</mi><mspace width="0.167em" /><msub><mi>L</mi><mi>e</mi></msub><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p><math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi mathvariant="bold-italic">&#x003B2;</mi></mrow></math> is a colour (red, green and blue separately), which is how a white light bouncing off a red
+        wall turns pink in the shadows: colour bleeding comes out of this one line. The code has it as
+        <code>throughput *= bs.weight</code> in <code>radiance()</code>, where every material returns the ratio
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>f</mi><mi>cos</mi><mi>&#x003B8;</mi><mo>&#x0002F;</mo><mi>p</mi></mrow></math> directly.</p>
+
+    <h3>Russian roulette</h3>
+
+    <p>Paths have to stop, but stopping after a fixed number of bounces loses light. After the first three bounces, Raymond
+        plays <em>Russian roulette</em> (<code>roulette()</code>): the path survives with probability</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>q</mi><mo>&#x0003D;</mo><mo>min</mo><mspace width="negativethinmathspace" /><mrow><mo stretchy="true" fence="true" form="prefix">&#x00028;</mo><mo>max</mo><mo stretchy="false">&#x00028;</mo><msub><mi>&#x003B2;</mi><mi>r</mi></msub><mo>&#x0002C;</mo><msub><mi>&#x003B2;</mi><mi>g</mi></msub><mo>&#x0002C;</mo><msub><mi>&#x003B2;</mi><mi>b</mi></msub><mo stretchy="false">&#x00029;</mo><mo>&#x0002C;</mo><mtext>&#x000A0;</mtext><mn>0.95</mn><mo stretchy="true" fence="true" form="postfix">&#x00029;</mo></mrow><mo>&#x0002C;</mo></mrow></math></div>
+
+    <p>and if it does, <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi mathvariant="bold-italic">&#x003B2;</mi><mo>&#x02190;</mo><mi mathvariant="bold-italic">&#x003B2;</mi><mo>&#x0002F;</mo><mi>q</mi></mrow></math>. On average,
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>q</mi><mo>&#x000B7;</mo><mi mathvariant="bold-italic">&#x003B2;</mi><mo>&#x0002F;</mo><mi>q</mi><mo>&#x0002B;</mo><mo stretchy="false">&#x00028;</mo><mn>1</mn><mo>&#x02212;</mo><mi>q</mi><mo stretchy="false">&#x00029;</mo><mo>&#x000B7;</mo><mn>0</mn><mo>&#x0003D;</mo><mi mathvariant="bold-italic">&#x003B2;</mi></mrow></math>: unbiased again, but dim paths, which can add
+        little, mostly end early, and the time goes on the bright ones. The bounce limit in the settings is a ceiling
+        on top of that.</p>
+
+    <h2 id="hits">5. Finding what a ray hits</h2>
+
+    <p>Every bounce needs the nearest surface along a ray. Raymond has four kinds of primitive (a mesh is just many
+        triangles), each with its own test (<code>intersect()</code>), and each test mirrored exactly on the CPU in
+        <code>Scene.raycast</code>, so tapping the image finds the same surface the GPU drew.</p>
+
+    <h3>Spheres</h3>
+
+    <p>A point is on a sphere of centre <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D41C;</mi></mrow></math> and radius <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>r</mi></mrow></math> when <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mo>&#x02016;</mo><mi>&#x1D429;</mi><mo>&#x02212;</mo><mi>&#x1D41C;</mi><mo>&#x02016;</mo><mo>&#x0003D;</mo><mi>r</mi></mrow></math>.
+        Putting in <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D42B;</mi><mo stretchy="false">&#x00028;</mo><mi>t</mi><mo stretchy="false">&#x00029;</mo></mrow></math> gives a quadratic in <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>t</mi></mrow></math>. With <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D426;</mi><mo>&#x0003D;</mo><mi>&#x1D428;</mi><mo>&#x02212;</mo><mi>&#x1D41C;</mi></mrow></math>:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>t</mi><mo>&#x0003D;</mo><mfrac><mrow><mo>&#x02212;</mo><mi>b</mi><mi>&#x000B1;</mi><msqrt><mrow><msup><mi>b</mi><mn>2</mn></msup><mo>&#x02212;</mo><mi>a</mi><mi>c</mi></mrow></msqrt></mrow><mrow><mi>a</mi></mrow></mfrac><mo>&#x0002C;</mo><mspace width="2em" /><mi>a</mi><mo>&#x0003D;</mo><mi>&#x1D41D;</mi><mo>&#x000B7;</mo><mi>&#x1D41D;</mi><mo>&#x0002C;</mo><mspace width="1em" /><mi>b</mi><mo>&#x0003D;</mo><mi>&#x1D426;</mi><mo>&#x000B7;</mo><mi>&#x1D41D;</mi><mo>&#x0002C;</mo><mspace width="1em" /><mi>c</mi><mo>&#x0003D;</mo><mi>&#x1D426;</mi><mo>&#x000B7;</mo><mi>&#x1D426;</mi><mo>&#x02212;</mo><msup><mi>r</mi><mn>2</mn></msup><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>A negative discriminant is a miss; otherwise the smaller root in range is the way in, or the larger one from
+        inside (glass needs both).</p>
+
+    <h3>Quads and triangles</h3>
+
+    <p>A quad is a corner <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D42A;</mi></mrow></math> and two edges <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>&#x1D41E;</mi><mi>u</mi></msub></mrow></math>, <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>&#x1D41E;</mi><mi>v</mi></msub></mrow></math>. The ray meets its plane, of
+        normal <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D427;</mi><mo>&#x0003D;</mo><msub><mi>&#x1D41E;</mi><mi>u</mi></msub><mo>&#x000D7;</mo><msub><mi>&#x1D41E;</mi><mi>v</mi></msub></mrow></math>, at</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>t</mi><mo>&#x0003D;</mo><mfrac><mrow><mi>&#x1D427;</mi><mo>&#x000B7;</mo><mo stretchy="false">&#x00028;</mo><mi>&#x1D42A;</mi><mo>&#x02212;</mo><mi>&#x1D428;</mi><mo stretchy="false">&#x00029;</mo></mrow><mrow><mi>&#x1D427;</mi><mo>&#x000B7;</mo><mi>&#x1D41D;</mi></mrow></mfrac><mo>&#x0002C;</mo></mrow></math></div>
+
+    <p>and the hit <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D421;</mi><mo>&#x0003D;</mo><mi>&#x1D42B;</mi><mo stretchy="false">&#x00028;</mo><mi>t</mi><mo stretchy="false">&#x00029;</mo><mo>&#x02212;</mo><mi>&#x1D42A;</mi></mrow></math> is inside if both of its coordinates along the edges,
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x003B1;</mi><mo>&#x0003D;</mo><mi>&#x1D427;</mi><mo>&#x000B7;</mo><mo stretchy="false">&#x00028;</mo><mi>&#x1D421;</mi><mo>&#x000D7;</mo><msub><mi>&#x1D41E;</mi><mi>v</mi></msub><mo stretchy="false">&#x00029;</mo><mo>&#x0002F;</mo><mo>&#x02016;</mo><mi>&#x1D427;</mi><msup><mo>&#x02016;</mo><mn>2</mn></msup></mrow></math> and
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x003B2;</mi><mo>&#x0003D;</mo><mi>&#x1D427;</mi><mo>&#x000B7;</mo><mo stretchy="false">&#x00028;</mo><msub><mi>&#x1D41E;</mi><mi>u</mi></msub><mo>&#x000D7;</mo><mi>&#x1D421;</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0002F;</mo><mo>&#x02016;</mo><mi>&#x1D427;</mi><msup><mo>&#x02016;</mo><mn>2</mn></msup></mrow></math>, lie in <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mo stretchy="false">[</mo><mn>0</mn><mo>&#x0002C;</mo><mn>1</mn><mo stretchy="false">]</mo></mrow></math>. Those
+        coordinates double as texture coordinates.</p>
+
+    <p>Triangles use the Möller–Trumbore test, which solves
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D428;</mi><mo>&#x0002B;</mo><mi>t</mi><mi>&#x1D41D;</mi><mo>&#x0003D;</mo><mo stretchy="false">&#x00028;</mo><mn>1</mn><mo>&#x02212;</mo><mi>u</mi><mo>&#x02212;</mo><mi>v</mi><mo stretchy="false">&#x00029;</mo><mspace width="0.167em" /><msub><mi>&#x1D42F;</mi><mn>0</mn></msub><mo>&#x0002B;</mo><mi>u</mi><mspace width="0.167em" /><msub><mi>&#x1D42F;</mi><mn>1</mn></msub><mo>&#x0002B;</mo><mi>v</mi><mspace width="0.167em" /><msub><mi>&#x1D42F;</mi><mn>2</mn></msub></mrow></math> for <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mo stretchy="false">&#x00028;</mo><mi>t</mi><mo>&#x0002C;</mo><mi>u</mi><mo>&#x0002C;</mo><mi>v</mi><mo stretchy="false">&#x00029;</mo></mrow></math>
+        by Cramer's rule. With <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>&#x1D41E;</mi><mn>1</mn></msub><mo>&#x0003D;</mo><msub><mi>&#x1D42F;</mi><mn>1</mn></msub><mo>&#x02212;</mo><msub><mi>&#x1D42F;</mi><mn>0</mn></msub></mrow></math>, <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>&#x1D41E;</mi><mn>2</mn></msub><mo>&#x0003D;</mo><msub><mi>&#x1D42F;</mi><mn>2</mn></msub><mo>&#x02212;</mo><msub><mi>&#x1D42F;</mi><mn>0</mn></msub></mrow></math>,
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D42C;</mi><mo>&#x0003D;</mo><mi>&#x1D428;</mi><mo>&#x02212;</mo><msub><mi>&#x1D42F;</mi><mn>0</mn></msub></mrow></math>, <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D429;</mi><mo>&#x0003D;</mo><mi>&#x1D41D;</mi><mo>&#x000D7;</mo><msub><mi>&#x1D41E;</mi><mn>2</mn></msub></mrow></math> and
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D42A;</mi><mo>&#x0003D;</mo><mi>&#x1D42C;</mi><mo>&#x000D7;</mo><msub><mi>&#x1D41E;</mi><mn>1</mn></msub></mrow></math>:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mo>&#x00028;</mo><mtable><mtr><mtd><mi>t</mi></mtd></mtr><mtr><mtd><mi>u</mi></mtd></mtr><mtr><mtd><mi>v</mi></mtd></mtr></mtable><mo>&#x00029;</mo><mo>&#x0003D;</mo><mfrac><mrow><mn>1</mn></mrow><mrow><mi>&#x1D429;</mi><mo>&#x000B7;</mo><msub><mi>&#x1D41E;</mi><mn>1</mn></msub></mrow></mfrac><mo>&#x00028;</mo><mtable><mtr><mtd><mi>&#x1D42A;</mi><mo>&#x000B7;</mo><msub><mi>&#x1D41E;</mi><mn>2</mn></msub></mtd></mtr><mtr><mtd><mi>&#x1D429;</mi><mo>&#x000B7;</mo><mi>&#x1D42C;</mi></mtd></mtr><mtr><mtd><mi>&#x1D42A;</mi><mo>&#x000B7;</mo><mi>&#x1D41D;</mi></mtd></mtr></mtable><mo>&#x00029;</mo><mo>&#x0002C;</mo></mrow></math></div>
+
+    <p>a hit if <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>u</mi><mo>&#x02265;</mo><mn>0</mn></mrow></math>, <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>v</mi><mo>&#x02265;</mo><mn>0</mn></mrow></math> and <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>u</mi><mo>&#x0002B;</mo><mi>v</mi><mo>&#x02264;</mo><mn>1</mn></mrow></math>. The same <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mo stretchy="false">&#x00028;</mo><mi>u</mi><mo>&#x0002C;</mo><mi>v</mi><mo stretchy="false">&#x00029;</mo></mrow></math> blend the vertices' normals, for smooth
+        shading, and their texture coordinates.</p>
+
+    <h3>Boxes, and the BVH</h3>
+
+    <p>A box, which can be turned any way, is tested in its own coordinates, where it spans <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mo>&#x02212;</mo><mn>1</mn></mrow></math> to <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mn>1</mn></mrow></math> on every
+        axis. There, each axis gives an interval of <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>t</mi></mrow></math> where the ray is between that pair of faces:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><msub><mi>t</mi><mrow><mtext>near</mtext></mrow></msub><mo>&#x0003D;</mo><msub><mo>max</mo><mrow><mi>k</mi></mrow></msub><mspace width="0.167em" /><mo>min</mo><mspace width="negativethinmathspace" /><mrow><mo stretchy="true" fence="true" form="prefix">&#x00028;</mo><mfrac><mrow><mo>&#x02212;</mo><mn>1</mn><mo>&#x02212;</mo><msub><mi>o</mi><mi>k</mi></msub></mrow><mrow><msub><mi>d</mi><mi>k</mi></msub></mrow></mfrac><mo>&#x0002C;</mo><mfrac><mrow><mn>1</mn><mo>&#x02212;</mo><msub><mi>o</mi><mi>k</mi></msub></mrow><mrow><msub><mi>d</mi><mi>k</mi></msub></mrow></mfrac><mo stretchy="true" fence="true" form="postfix">&#x00029;</mo></mrow><mo>&#x0002C;</mo><mspace width="2em" /><msub><mi>t</mi><mrow><mtext>far</mtext></mrow></msub><mo>&#x0003D;</mo><msub><mo>min</mo><mrow><mi>k</mi></mrow></msub><mspace width="0.167em" /><mo>max</mo><mspace width="negativethinmathspace" /><mrow><mo stretchy="true" fence="true" form="prefix">&#x00028;</mo><mfrac><mrow><mo>&#x02212;</mo><mn>1</mn><mo>&#x02212;</mo><msub><mi>o</mi><mi>k</mi></msub></mrow><mrow><msub><mi>d</mi><mi>k</mi></msub></mrow></mfrac><mo>&#x0002C;</mo><mfrac><mrow><mn>1</mn><mo>&#x02212;</mo><msub><mi>o</mi><mi>k</mi></msub></mrow><mrow><msub><mi>d</mi><mi>k</mi></msub></mrow></mfrac><mo stretchy="true" fence="true" form="postfix">&#x00029;</mo></mrow><mo>&#x0002C;</mo></mrow></math></div>
+
+    <p>and the ray hits the box when <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>t</mi><mrow><mtext>near</mtext></mrow></msub><mo>&#x02264;</mo><msub><mi>t</mi><mrow><mtext>far</mtext></mrow></msub></mrow></math>. This <em>slab test</em> is also how Raymond
+        avoids testing every primitive. They're sorted into a <em>bounding volume hierarchy</em>, a tree of boxes,
+        each holding two smaller boxes, down to leaves of a few primitives. A ray that misses a box skips everything
+        in it, so it typically tests a few dozen primitives rather than tens of thousands. The tree is built to
+        minimise the <em>surface area heuristic</em>, the expected cost of a random ray,</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>C</mi><mo>&#x0003D;</mo><msub><mi>C</mi><mrow><mtext>box</mtext></mrow></msub><mo>&#x0002B;</mo><mfrac><mrow><msub><mi>A</mi><mi>L</mi></msub></mrow><mrow><mi>A</mi></mrow></mfrac><mspace width="0.167em" /><msub><mi>N</mi><mi>L</mi></msub><mspace width="0.167em" /><msub><mi>C</mi><mrow><mtext>prim</mtext></mrow></msub><mo>&#x0002B;</mo><mfrac><mrow><msub><mi>A</mi><mi>R</mi></msub></mrow><mrow><mi>A</mi></mrow></mfrac><mspace width="0.167em" /><msub><mi>N</mi><mi>R</mi></msub><mspace width="0.167em" /><msub><mi>C</mi><mrow><mtext>prim</mtext></mrow></msub><mo>&#x0002C;</mo></mrow></math></div>
+
+    <p>since the chance that a ray through a box also passes through a box inside it is the ratio of their surface
+        areas. The <a href="https://github.com/StefanSkrobanski/Raymond/blob/main/docs/bvh.md">BVH notes</a> go into
+        it in detail.</p>
+
+    <div class="note">
+        <p><strong>Getting off the surface.</strong> A new ray starting exactly on a surface can hit that same surface
+            again through rounding error, speckling the image with false shadows. Raymond nudges every new ray off the
+            surface, by <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msup><mn>10</mn><mrow><mo>&#x02212;</mo><mn>4</mn></mrow></msup><mo>max</mo><mo stretchy="false">&#x00028;</mo><mn>1</mn><mo>&#x0002C;</mo><mo>&#x02016;</mo><mi>&#x1D429;</mi><msub><mo>&#x02016;</mo><mo>&#x0221E;</mo></msub><mo stretchy="false">&#x00029;</mo></mrow></math> along the normal, on the side it leaves by
+            (<code>offset()</code>).</p>
+    </div>
+
+    <h2 id="materials">6. Materials</h2>
+
+    <p>Each material is a BSDF <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>f</mi></mrow></math> together with a way of drawing directions from it. Raymond keeps the two in one
+        place (<code>eval_bsdf()</code> gives <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>f</mi><mi>cos</mi><mi>&#x003B8;</mi></mrow></math> and <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>p</mi></mrow></math>; <code>sample_bsdf()</code> draws a direction
+        and returns their ratio), so they can't drift apart.</p>
+
+    <h3>Diffuse</h3>
+
+    <p>A perfectly matte surface (Lambertian) scatters light equally in all directions: <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>f</mi><mo>&#x0003D;</mo><mi>&#x003C1;</mi><mo>&#x0002F;</mo><mi>&#x003C0;</mi></mrow></math>, where
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x003C1;</mi></mrow></math> is its colour, the fraction of light it reflects. The <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x003C0;</mi></mrow></math> is what makes it reflect exactly
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x003C1;</mi></mrow></math> in total, since <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mo>&#x0222B;</mo><mi>&#x003A9;</mi></msub><mi>cos</mi><mi>&#x003B8;</mi><mspace width="0.167em" /><mi>&#x00064;</mi><mi>&#x003C9;</mi><mo>&#x0003D;</mo><mi>&#x003C0;</mi></mrow></math>. Directions are drawn with
+        <em>cosine-weighted</em> density, <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>p</mi><mo>&#x0003D;</mo><mi>cos</mi><mi>&#x003B8;</mi><mo>&#x0002F;</mo><mi>&#x003C0;</mi></mrow></math>, by picking a point evenly on the unit disc and
+        lifting it onto the hemisphere:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>r</mi><mo>&#x0003D;</mo><msqrt><mrow><msub><mi>&#x003BE;</mi><mn>1</mn></msub></mrow></msqrt><mo>&#x0002C;</mo><mspace width="1em" /><mi>&#x003D5;</mi><mo>&#x0003D;</mo><mn>2</mn><mi>&#x003C0;</mi><msub><mi>&#x003BE;</mi><mn>2</mn></msub><mo>&#x0002C;</mo><mspace width="2em" /><mi>&#x003C9;</mi><mo>&#x0003D;</mo><mrow><mo stretchy="true" fence="true" form="prefix">&#x00028;</mo><mi>r</mi><mi>cos</mi><mi>&#x003D5;</mi><mo>&#x0002C;</mo><mtext>&#x000A0;</mtext><mi>r</mi><mi>sin</mi><mi>&#x003D5;</mi><mo>&#x0002C;</mo><mtext>&#x000A0;</mtext><msqrt><mrow><mn>1</mn><mo>&#x02212;</mo><msup><mi>r</mi><mn>2</mn></msup></mrow></msqrt><mo stretchy="true" fence="true" form="postfix">&#x00029;</mo></mrow><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>Then <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>f</mi><mi>cos</mi><mi>&#x003B8;</mi><mo>&#x0002F;</mo><mi>p</mi><mo>&#x0003D;</mo><mi>&#x003C1;</mi></mrow></math> exactly: every bounce off a matte wall just multiplies the throughput by its
+        colour, with no noise from the choice of direction at all.</p>
+
+    <h3>Metal: microfacets</h3>
+
+    <p>Rough metal is modelled as a surface of tiny perfect mirrors (microfacets) facing every which way. The
+        <em>GGX</em> distribution says how many face along each half-vector
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D421;</mi><mo>&#x0003D;</mo><mo>normalize</mo><mo stretchy="false">&#x00028;</mo><msub><mi>&#x003C9;</mi><mi>i</mi></msub><mo>&#x0002B;</mo><msub><mi>&#x003C9;</mi><mi>o</mi></msub><mo stretchy="false">&#x00029;</mo></mrow></math>, with roughness <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x003B1;</mi><mo>&#x0003D;</mo><msup><mtext>roughness</mtext><mn>2</mn></msup></mrow></math>:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>D</mi><mo stretchy="false">&#x00028;</mo><mi>&#x1D421;</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0003D;</mo><mfrac><mrow><msup><mi>&#x003B1;</mi><mn>2</mn></msup></mrow><mrow><mi>&#x003C0;</mi><msup><mrow><mo stretchy="true" fence="true" form="prefix">&#x00028;</mo><mo stretchy="false">&#x00028;</mo><mi>&#x1D427;</mi><mo>&#x000B7;</mo><mi>&#x1D421;</mi><msup><mo stretchy="false">&#x00029;</mo><mn>2</mn></msup><mo stretchy="false">&#x00028;</mo><msup><mi>&#x003B1;</mi><mn>2</mn></msup><mo>&#x02212;</mo><mn>1</mn><mo stretchy="false">&#x00029;</mo><mo>&#x0002B;</mo><mn>1</mn><mo stretchy="true" fence="true" form="postfix">&#x00029;</mo></mrow><mn>2</mn></msup></mrow></mfrac><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>Some facets shadow others; Smith's masking term accounts for that, for each direction:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><msub><mi>G</mi><mn>1</mn></msub><mo stretchy="false">&#x00028;</mo><mi>&#x003C9;</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0003D;</mo><mfrac><mrow><mn>2</mn><mspace width="0.167em" /><mo stretchy="false">&#x00028;</mo><mi>&#x1D427;</mi><mo>&#x000B7;</mo><mi>&#x003C9;</mi><mo stretchy="false">&#x00029;</mo></mrow><mrow><mi>&#x1D427;</mi><mo>&#x000B7;</mo><mi>&#x003C9;</mi><mo>&#x0002B;</mo><msqrt><mrow><msup><mi>&#x003B1;</mi><mn>2</mn></msup><mo>&#x0002B;</mo><mo stretchy="false">&#x00028;</mo><mn>1</mn><mo>&#x02212;</mo><msup><mi>&#x003B1;</mi><mn>2</mn></msup><mo stretchy="false">&#x00029;</mo><mo stretchy="false">&#x00028;</mo><mi>&#x1D427;</mi><mo>&#x000B7;</mo><mi>&#x003C9;</mi><msup><mo stretchy="false">&#x00029;</mo><mn>2</mn></msup></mrow></msqrt></mrow></mfrac><mo>&#x0002C;</mo><mspace width="2em" /><mi>G</mi><mo>&#x0003D;</mo><msub><mi>G</mi><mn>1</mn></msub><mo stretchy="false">&#x00028;</mo><msub><mi>&#x003C9;</mi><mi>i</mi></msub><mo stretchy="false">&#x00029;</mo><mspace width="0.167em" /><msub><mi>G</mi><mn>1</mn></msub><mo stretchy="false">&#x00028;</mo><msub><mi>&#x003C9;</mi><mi>o</mi></msub><mo stretchy="false">&#x00029;</mo><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>And metals reflect more at grazing angles, towards white; Schlick's approximation of the Fresnel factor, starting
+        from the metal's own colour <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>F</mi><mn>0</mn></msub></mrow></math>:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>F</mi><mo stretchy="false">&#x00028;</mo><mi>&#x003B8;</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0003D;</mo><msub><mi>F</mi><mn>0</mn></msub><mo>&#x0002B;</mo><mo stretchy="false">&#x00028;</mo><mn>1</mn><mo>&#x02212;</mo><msub><mi>F</mi><mn>0</mn></msub><mo stretchy="false">&#x00029;</mo><mo stretchy="false">&#x00028;</mo><mn>1</mn><mo>&#x02212;</mo><mi>cos</mi><mi>&#x003B8;</mi><msup><mo stretchy="false">&#x00029;</mo><mn>5</mn></msup><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>Together, the Cook–Torrance BSDF:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>f</mi><mo stretchy="false">&#x00028;</mo><msub><mi>&#x003C9;</mi><mi>i</mi></msub><mo>&#x0002C;</mo><msub><mi>&#x003C9;</mi><mi>o</mi></msub><mo stretchy="false">&#x00029;</mo><mo>&#x0003D;</mo><mfrac><mrow><mi>F</mi><mspace width="0.167em" /><mi>D</mi><mspace width="0.167em" /><mi>G</mi></mrow><mrow><mn>4</mn><mspace width="0.167em" /><mo stretchy="false">&#x00028;</mo><mi>&#x1D427;</mi><mo>&#x000B7;</mo><msub><mi>&#x003C9;</mi><mi>i</mi></msub><mo stretchy="false">&#x00029;</mo><mo stretchy="false">&#x00028;</mo><mi>&#x1D427;</mi><mo>&#x000B7;</mo><msub><mi>&#x003C9;</mi><mi>o</mi></msub><mo stretchy="false">&#x00029;</mo></mrow></mfrac><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>Directions are drawn by picking a facet in proportion to <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>D</mi><mo stretchy="false">&#x00028;</mo><mi>&#x1D421;</mi><mo stretchy="false">&#x00029;</mo><mi>cos</mi><msub><mi>&#x003B8;</mi><mi>h</mi></msub></mrow></math>, with
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>cos</mi><msub><mi>&#x003B8;</mi><mi>h</mi></msub><mo>&#x0003D;</mo><msqrt><mrow><mo stretchy="false">&#x00028;</mo><mn>1</mn><mo>&#x02212;</mo><mi>&#x003BE;</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0002F;</mo><mo stretchy="false">&#x00028;</mo><mn>1</mn><mo>&#x0002B;</mo><mo stretchy="false">&#x00028;</mo><msup><mi>&#x003B1;</mi><mn>2</mn></msup><mo>&#x02212;</mo><mn>1</mn><mo stretchy="false">&#x00029;</mo><mi>&#x003BE;</mi><mo stretchy="false">&#x00029;</mo></mrow></msqrt></mrow></math>, and reflecting <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>&#x003C9;</mi><mi>o</mi></msub></mrow></math> in it. Reflecting about
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D421;</mi></mrow></math> doubles angles, so the density of the outgoing direction is</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>p</mi><mo stretchy="false">&#x00028;</mo><msub><mi>&#x003C9;</mi><mi>i</mi></msub><mo stretchy="false">&#x00029;</mo><mo>&#x0003D;</mo><mfrac><mrow><mi>D</mi><mo stretchy="false">&#x00028;</mo><mi>&#x1D421;</mi><mo stretchy="false">&#x00029;</mo><mspace width="0.167em" /><mo stretchy="false">&#x00028;</mo><mi>&#x1D427;</mi><mo>&#x000B7;</mo><mi>&#x1D421;</mi><mo stretchy="false">&#x00029;</mo></mrow><mrow><mn>4</mn><mspace width="0.167em" /><mo stretchy="false">&#x00028;</mo><msub><mi>&#x003C9;</mi><mi>o</mi></msub><mo>&#x000B7;</mo><mi>&#x1D421;</mi><mo stretchy="false">&#x00029;</mo></mrow></mfrac><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>Below a roughness of 0.01, metal is treated as a perfect mirror: a <em>delta</em> BSDF, all of whose light leaves
+        in exactly one direction. No density can describe that, so Raymond handles delta surfaces separately: they
+        reflect (or, for glass, refract) the one way, with weight <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>F</mi></mrow></math>, and skip the light aiming of
+        <a href="#lights">section 7</a>, which could never land on that one direction.</p>
+
+    <h3>Glass</h3>
+
+    <p>At a glass surface light either reflects or refracts. Snell's law bends it, with the refractive indices on each
+        side:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><msub><mi>&#x003B7;</mi><mn>1</mn></msub><mi>sin</mi><msub><mi>&#x003B8;</mi><mn>1</mn></msub><mo>&#x0003D;</mo><msub><mi>&#x003B7;</mi><mn>2</mn></msub><mi>sin</mi><msub><mi>&#x003B8;</mi><mn>2</mn></msub><mo>&#x0002C;</mo></mrow></math></div>
+
+    <p>and the exact Fresnel equations say how much reflects, averaging the two polarisations, with
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x003B7;</mi><mo>&#x0003D;</mo><msub><mi>&#x003B7;</mi><mn>2</mn></msub><mo>&#x0002F;</mo><msub><mi>&#x003B7;</mi><mn>1</mn></msub></mrow></math>:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><msub><mi>r</mi><mi>s</mi></msub><mo>&#x0003D;</mo><mfrac><mrow><mi>cos</mi><msub><mi>&#x003B8;</mi><mn>1</mn></msub><mo>&#x02212;</mo><mi>&#x003B7;</mi><mi>cos</mi><msub><mi>&#x003B8;</mi><mn>2</mn></msub></mrow><mrow><mi>cos</mi><msub><mi>&#x003B8;</mi><mn>1</mn></msub><mo>&#x0002B;</mo><mi>&#x003B7;</mi><mi>cos</mi><msub><mi>&#x003B8;</mi><mn>2</mn></msub></mrow></mfrac><mo>&#x0002C;</mo><mspace width="2em" /><msub><mi>r</mi><mi>p</mi></msub><mo>&#x0003D;</mo><mfrac><mrow><mi>&#x003B7;</mi><mi>cos</mi><msub><mi>&#x003B8;</mi><mn>1</mn></msub><mo>&#x02212;</mo><mi>cos</mi><msub><mi>&#x003B8;</mi><mn>2</mn></msub></mrow><mrow><mi>&#x003B7;</mi><mi>cos</mi><msub><mi>&#x003B8;</mi><mn>1</mn></msub><mo>&#x0002B;</mo><mi>cos</mi><msub><mi>&#x003B8;</mi><mn>2</mn></msub></mrow></mfrac><mo>&#x0002C;</mo><mspace width="2em" /><mi>F</mi><mo>&#x0003D;</mo><mstyle displaystyle="false" scriptlevel="0"><mfrac><mn>1</mn><mn>2</mn></mfrac></mstyle><mrow><mo stretchy="true" fence="true" form="prefix">&#x00028;</mo><msubsup><mi>r</mi><mi>s</mi><mn>2</mn></msubsup><mo>&#x0002B;</mo><msubsup><mi>r</mi><mi>p</mi><mn>2</mn></msubsup><mo stretchy="true" fence="true" form="postfix">&#x00029;</mo></mrow><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>(When <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>sin</mi><msub><mi>&#x003B8;</mi><mn>2</mn></msub></mrow></math> would exceed 1, all the light reflects: total internal reflection, which makes the
+        bright rims inside a glass ball.) Rather than following both, Raymond reflects with probability <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>F</mi></mrow></math> and
+        refracts otherwise. Each choice's weight is then its share divided by its probability, <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>F</mi><mo>&#x0002F;</mo><mi>F</mi><mo>&#x0003D;</mo><mn>1</mn></mrow></math>: glass costs
+        no noise for the choice. Tinted glass multiplies by its colour once, on the way in.</p>
+
+    <h3>Dispersion</h3>
+
+    <p>Real glass bends blue more than red, which is how a prism makes a rainbow. Raymond uses Cauchy's equation for
+        the index at wavelength <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x003BB;</mi></mrow></math> (in micrometres),</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>n</mi><mo stretchy="false">&#x00028;</mo><mi>&#x003BB;</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0003D;</mo><msub><mi>n</mi><mi>d</mi></msub><mo>&#x0002B;</mo><mi>B</mi><mrow><mo stretchy="true" fence="true" form="prefix">&#x00028;</mo><mfrac><mrow><mn>1</mn></mrow><mrow><msup><mi>&#x003BB;</mi><mn>2</mn></msup></mrow></mfrac><mo>&#x02212;</mo><mfrac><mrow><mn>1</mn></mrow><mrow><msubsup><mi>&#x003BB;</mi><mi>d</mi><mn>2</mn></msubsup></mrow></mfrac><mo stretchy="true" fence="true" form="postfix">&#x00029;</mo></mrow><mo>&#x0002C;</mo></mrow></math></div>
+
+    <p>with <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>&#x003BB;</mi><mi>d</mi></msub><mo>&#x0003D;</mo><mn>0.5876</mn><mspace width="0.167em" /><mi>&#x003BC;</mi><mtext>m</mtext></mrow></math>, and works <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>B</mi></mrow></math> out from the Abbe number <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>V</mi><mi>d</mi></msub></mrow></math> that glassmakers
+        quote, <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>V</mi><mi>d</mi></msub><mo>&#x0003D;</mo><mo stretchy="false">&#x00028;</mo><msub><mi>n</mi><mi>d</mi></msub><mo>&#x02212;</mo><mn>1</mn><mo stretchy="false">&#x00029;</mo><mo>&#x0002F;</mo><mo stretchy="false">&#x00028;</mo><msub><mi>n</mi><mi>F</mi></msub><mo>&#x02212;</mo><msub><mi>n</mi><mi>C</mi></msub><mo stretchy="false">&#x00029;</mo></mrow></math>:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>B</mi><mo>&#x0003D;</mo><mfrac><mrow><msub><mi>n</mi><mi>d</mi></msub><mo>&#x02212;</mo><mn>1</mn></mrow><mrow><msub><mi>V</mi><mi>d</mi></msub><mrow><mo stretchy="true" fence="true" form="prefix">&#x00028;</mo><msubsup><mi>&#x003BB;</mi><mi>F</mi><mrow><mo>&#x02212;</mo><mn>2</mn></mrow></msubsup><mo>&#x02212;</mo><msubsup><mi>&#x003BB;</mi><mi>C</mi><mrow><mo>&#x02212;</mo><mn>2</mn></mrow></msubsup><mo stretchy="true" fence="true" form="postfix">&#x00029;</mo></mrow></mrow></mfrac><mo>&#x0002C;</mo><mspace width="2em" /><msub><mi>&#x003BB;</mi><mi>F</mi></msub><mo>&#x0003D;</mo><mn>0.4861</mn><mo>&#x0002C;</mo><mtext>&#x000A0;</mtext><msub><mi>&#x003BB;</mi><mi>C</mi></msub><mo>&#x0003D;</mo><mn>0.6563</mn><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>The first time a path refracts through such glass it commits to one wavelength, and from then on carries only
+        that wavelength's colour (Wyman, Sloan and Shirley's fit to the CIE colour matching functions, scaled so the
+        average over the spectrum is white). Choosing wavelengths at random would make the colours converge slowly;
+        instead each pixel steps through the spectrum by the golden ratio,</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><msub><mi>u</mi><mi>k</mi></msub><mo>&#x0003D;</mo><mo>frac</mo><mspace width="negativethinmathspace" /><mrow><mo stretchy="true" fence="true" form="prefix">&#x00028;</mo><msub><mi>u</mi><mn>0</mn></msub><mo>&#x0002B;</mo><mi>k</mi><mspace width="0.167em" /><mi>&#x003C6;</mi><mo stretchy="true" fence="true" form="postfix">&#x00029;</mo></mrow><mo>&#x0002C;</mo><mspace width="2em" /><mi>&#x003C6;</mi><mo>&#x0003D;</mo><mfrac><mrow><msqrt><mn>5</mn></msqrt><mo>&#x02212;</mo><mn>1</mn></mrow><mrow><mn>2</mn></mrow></mfrac><mo>&#x0002C;</mo></mrow></math></div>
+
+    <p>which spreads any number of samples almost evenly across it (a low-discrepancy sequence).</p>
+
+    <h3>Plastic</h3>
+
+    <p>Plastic is a clear varnish over coloured paint: a GGX coat (like metal, but with the Fresnel of a dielectric,
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>F</mi><mn>0</mn></msub><mo>&#x0003D;</mo><mo stretchy="false">&#x00028;</mo><mo stretchy="false">&#x00028;</mo><mi>&#x003B7;</mi><mo>&#x02212;</mo><mn>1</mn><mo stretchy="false">&#x00029;</mo><mo>&#x0002F;</mo><mo stretchy="false">&#x00028;</mo><mi>&#x003B7;</mi><mo>&#x0002B;</mo><mn>1</mn><mo stretchy="false">&#x00029;</mo><msup><mo stretchy="false">&#x00029;</mo><mn>2</mn></msup></mrow></math>, about 4%) over a diffuse base that gets only the light the coat lets through
+        on the way in and out. Each sample picks one layer to draw from, glossy or diffuse, and the density is the
+        mixture of both, so either choice is weighted correctly.</p>
+
+    <h2 id="lights">7. Aiming at the lights</h2>
+
+    <p>A small lamp is hard to hit by bouncing at random: a path reaching it by chance is rare, and when it does it
+        brings back a lot of light, which is exactly the recipe for noise. So at every surface Raymond also aims one
+        ray straight at a light (<em>next event estimation</em>, <code>sample_light()</code>). If nothing is in the
+        way, that light is added in:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>L</mi><mo>&#x02190;</mo><mi>L</mi><mo>&#x0002B;</mo><mi mathvariant="bold-italic">&#x003B2;</mi><mspace width="0.167em" /><mfrac><mrow><mi>f</mi><mo stretchy="false">&#x00028;</mo><msub><mi>&#x003C9;</mi><mi>l</mi></msub><mo>&#x0002C;</mo><msub><mi>&#x003C9;</mi><mi>o</mi></msub><mo stretchy="false">&#x00029;</mo><mspace width="0.167em" /><mi>cos</mi><mi>&#x003B8;</mi><mspace width="0.278em" /><msub><mi>L</mi><mi>e</mi></msub></mrow><mrow><msub><mi>p</mi><mi>l</mi></msub><mo stretchy="false">&#x00028;</mo><msub><mi>&#x003C9;</mi><mi>l</mi></msub><mo stretchy="false">&#x00029;</mo></mrow></mfrac><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>A light is chosen evenly among the lamps, the sun and the sky, and the density includes that chance. For a
+        rectangular lamp of area <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>A</mi></mrow></math>, a point is chosen evenly on it, density <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mn>1</mn><mo>&#x0002F;</mo><mi>A</mi></mrow></math> per area, which has to be
+        turned into a density per solid angle, as seen from the surface: a patch <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x00064;</mi><mi>A</mi></mrow></math> at distance <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>r</mi></mrow></math>,
+        tilted by <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>&#x003B8;</mi><mi>l</mi></msub></mrow></math> from facing us, covers <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x00064;</mi><mi>&#x003C9;</mi><mo>&#x0003D;</mo><mi>cos</mi><msub><mi>&#x003B8;</mi><mi>l</mi></msub><mspace width="0.167em" /><mi>&#x00064;</mi><mi>A</mi><mo>&#x0002F;</mo><msup><mi>r</mi><mn>2</mn></msup></mrow></math>, so</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><msub><mi>p</mi><mi>l</mi></msub><mo stretchy="false">&#x00028;</mo><mi>&#x003C9;</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0003D;</mo><mfrac><mrow><msup><mi>r</mi><mn>2</mn></msup></mrow><mrow><mi>A</mi><mi>cos</mi><msub><mi>&#x003B8;</mi><mi>l</mi></msub></mrow></mfrac><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>A round lamp is sampled better still: Raymond picks a direction evenly within the cone it covers,
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>cos</mi><mi>&#x003B8;</mi><mo>&#x0003D;</mo><mn>1</mn><mo>&#x02212;</mo><mi>&#x003BE;</mi><mspace width="0.167em" /><mo stretchy="false">&#x00028;</mo><mn>1</mn><mo>&#x02212;</mo><mi>cos</mi><msub><mi>&#x003B8;</mi><mrow><mo>max</mo></mrow></msub><mo stretchy="false">&#x00029;</mo></mrow></math> with <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>sin</mi><msub><mi>&#x003B8;</mi><mrow><mo>max</mo></mrow></msub><mo>&#x0003D;</mo><mi>r</mi><mo>&#x0002F;</mo><mi>d</mi></mrow></math>, for density</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><msub><mi>p</mi><mi>l</mi></msub><mo stretchy="false">&#x00028;</mo><mi>&#x003C9;</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0003D;</mo><mfrac><mrow><mn>1</mn></mrow><mrow><mn>2</mn><mi>&#x003C0;</mi><mspace width="0.167em" /><mo stretchy="false">&#x00028;</mo><mn>1</mn><mo>&#x02212;</mo><mi>cos</mi><msub><mi>&#x003B8;</mi><mrow><mo>max</mo></mrow></msub><mo stretchy="false">&#x00029;</mo></mrow></mfrac><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>For a small or distant lamp <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mn>1</mn><mo>&#x02212;</mo><mi>cos</mi><msub><mi>&#x003B8;</mi><mrow><mo>max</mo></mrow></msub></mrow></math> is tiny, and computing it as written would lose it to rounding;
+        the code uses the equivalent <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>x</mi><mo>&#x0002F;</mo><mo stretchy="false">&#x00028;</mo><mn>1</mn><mo>&#x0002B;</mo><msqrt><mrow><mn>1</mn><mo>&#x02212;</mo><mi>x</mi></mrow></msqrt><mo stretchy="false">&#x00029;</mo></mrow></math> with <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>x</mi><mo>&#x0003D;</mo><msup><mi>r</mi><mn>2</mn></msup><mo>&#x0002F;</mo><msup><mi>d</mi><mn>2</mn></msup></mrow></math> (<code>sphere_omc()</code>). The sun is
+        a cone too, a fixed one in the direction of the sun.</p>
+
+    <h2 id="mis">8. Multiple importance sampling</h2>
+
+    <p>Now there are two ways to find a lamp: aim at it, or bounce into it. Counting both would count it twice; and
+        each is good at different times. Aiming wins for small lamps on matte surfaces; bouncing wins for big lamps
+        seen in shiny ones, where aiming picks directions the material barely reflects. Veach's <em>multiple
+        importance sampling</em> uses both and weights each sample by how good its strategy was at producing it. With
+        the <em>power heuristic</em>, a sample drawn by strategy <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>a</mi></mrow></math> counts with weight</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><msub><mi>w</mi><mi>a</mi></msub><mo stretchy="false">&#x00028;</mo><mi>&#x003C9;</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0003D;</mo><mfrac><mrow><msub><mi>p</mi><mi>a</mi></msub><mo stretchy="false">&#x00028;</mo><mi>&#x003C9;</mi><msup><mo stretchy="false">&#x00029;</mo><mn>2</mn></msup></mrow><mrow><msub><mi>p</mi><mi>a</mi></msub><mo stretchy="false">&#x00028;</mo><mi>&#x003C9;</mi><msup><mo stretchy="false">&#x00029;</mo><mn>2</mn></msup><mo>&#x0002B;</mo><msub><mi>p</mi><mi>b</mi></msub><mo stretchy="false">&#x00028;</mo><mi>&#x003C9;</mi><msup><mo stretchy="false">&#x00029;</mo><mn>2</mn></msup></mrow></mfrac><mo>&#x0002C;</mo></mrow></math></div>
+
+    <p>where <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>p</mi><mi>b</mi></msub></mrow></math> is the density the <em>other</em> strategy would have had of choosing the same direction
+        (<code>light_pdf()</code> for a bounce that hit a lamp). The two weights add up to 1 for every direction, so
+        the result stays unbiased, and whichever strategy was more likely to find a direction gets most of the say in
+        it. The result is about as good as the better of the two everywhere, without having to choose.</p>
+
+    <h2 id="sky">9. Skies and environment maps</h2>
+
+    <p>Without a panorama, the sky is a gradient from horizon to zenith, plus a sun. With one (an HDR photograph of
+        light from every direction), a direction <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x003C9;</mi></mrow></math> maps to texture coordinates <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>u</mi></mrow></math> round the horizon and
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>v</mi></mrow></math> down from the zenith, <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x003B8;</mi><mo>&#x0003D;</mo><mi>&#x003C0;</mi><mi>v</mi></mrow></math>. Aiming at the sky means drawing directions in proportion to
+        how bright they are, so Raymond builds a table of the panorama's luminance per cell, times <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>sin</mi><mi>&#x003B8;</mi></mrow></math>,
+        since cells near the poles cover less of the sky:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>P</mi><mo stretchy="false">&#x00028;</mo><mi>u</mi><mo>&#x0002C;</mo><mi>v</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0221D;</mo><mi>Y</mi><mo stretchy="false">&#x00028;</mo><mi>u</mi><mo>&#x0002C;</mo><mi>v</mi><mo stretchy="false">&#x00029;</mo><mspace width="0.167em" /><mi>sin</mi><mo stretchy="false">&#x00028;</mo><mi>&#x003C0;</mi><mi>v</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>Picking a row, then a cell in it, by binary search through the cumulative sums, gives a density over the map;
+        changing variables from <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mo stretchy="false">&#x00028;</mo><mi>u</mi><mo>&#x0002C;</mo><mi>v</mi><mo stretchy="false">&#x00029;</mo></mrow></math> to solid angle, where <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x00064;</mi><mi>&#x003C9;</mi><mo>&#x0003D;</mo><mn>2</mn><msup><mi>&#x003C0;</mi><mn>2</mn></msup><mi>sin</mi><mi>&#x003B8;</mi><mspace width="0.167em" /><mi>&#x00064;</mi><mi>u</mi><mspace width="0.167em" /><mi>&#x00064;</mi><mi>v</mi></mrow></math>, gives</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>p</mi><mo stretchy="false">&#x00028;</mo><mi>&#x003C9;</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0003D;</mo><mfrac><mrow><mi>P</mi><mo stretchy="false">&#x00028;</mo><mi>u</mi><mo>&#x0002C;</mo><mi>v</mi><mo stretchy="false">&#x00029;</mo></mrow><mrow><mn>2</mn><msup><mi>&#x003C0;</mi><mn>2</mn></msup><mi>sin</mi><mi>&#x003B8;</mi></mrow></mfrac><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>A sun in the photograph, thousands of times brighter than the rest, then gets found on nearly every bounce.</p>
+
+    <h2 id="fog">10. Fog</h2>
+
+    <p>In fog, light can scatter anywhere along a ray, not just at surfaces. In a medium of density <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x003C3;</mi></mrow></math>
+        (chance of scattering per unit length), the fraction of light getting through a distance <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>t</mi></mrow></math> follows the
+        Beer–Lambert law:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>T</mi><mo stretchy="false">&#x00028;</mo><mi>t</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0003D;</mo><msup><mi>e</mi><mrow><mo>&#x02212;</mo><mi>&#x003C3;</mi><mi>t</mi></mrow></msup><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>Raymond draws where a ray first meets a particle from exactly that distribution (<em>free-flight sampling</em>,
+        <code>scatter_in_volumes()</code>):</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>t</mi><mo>&#x0003D;</mo><mo>&#x02212;</mo><mfrac><mrow><mi>ln</mi><mo stretchy="false">&#x00028;</mo><mn>1</mn><mo>&#x02212;</mo><mi>&#x003BE;</mi><mo stretchy="false">&#x00029;</mo></mrow><mrow><mi>&#x003C3;</mi></mrow></mfrac><mo>&#x0002C;</mo><mspace width="2em" /><mi>p</mi><mo stretchy="false">&#x00028;</mo><mi>t</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0003D;</mo><mi>&#x003C3;</mi><msup><mi>e</mi><mrow><mo>&#x02212;</mo><mi>&#x003C3;</mi><mi>t</mi></mrow></msup><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>If that's before the next surface, the ray scatters there. Because the density and the attenuation are the same
+        exponential, the weight is exactly the fog's colour (its albedo): again, no noise from the choice. Where it
+        scatters, the new direction comes from the Henyey–Greenstein phase function, with <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>g</mi></mrow></math> from <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mo>&#x02212;</mo><mn>1</mn></mrow></math> (back the
+        way it came) through <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mn>0</mn></mrow></math> (evenly) to <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mn>1</mn></mrow></math> (straight on):</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><msub><mi>p</mi><mrow><mi>H</mi><mi>G</mi></mrow></msub><mo stretchy="false">&#x00028;</mo><mi>cos</mi><mi>&#x003B8;</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0003D;</mo><mfrac><mrow><mn>1</mn></mrow><mrow><mn>4</mn><mi>&#x003C0;</mi></mrow></mfrac><mspace width="0.167em" /><mfrac><mrow><mn>1</mn><mo>&#x02212;</mo><msup><mi>g</mi><mn>2</mn></msup></mrow><mrow><msup><mrow><mo stretchy="true" fence="true" form="prefix">&#x00028;</mo><mn>1</mn><mo>&#x0002B;</mo><msup><mi>g</mi><mn>2</mn></msup><mo>&#x02212;</mo><mn>2</mn><mi>g</mi><mi>cos</mi><mi>&#x003B8;</mi><mo stretchy="true" fence="true" form="postfix">&#x00029;</mo></mrow><mrow><mn>3</mn><mo>&#x0002F;</mo><mn>2</mn></mrow></msup></mrow></mfrac><mo>&#x0002C;</mo></mrow></math></div>
+
+    <p>sampled exactly by</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>cos</mi><mi>&#x003B8;</mi><mo>&#x0003D;</mo><mfrac><mrow><mn>1</mn></mrow><mrow><mn>2</mn><mi>g</mi></mrow></mfrac><mrow><mo stretchy="true" fence="true" form="prefix">&#x00028;</mo><mn>1</mn><mo>&#x0002B;</mo><msup><mi>g</mi><mn>2</mn></msup><mo>&#x02212;</mo><msup><mrow><mo stretchy="true" fence="true" form="prefix">&#x00028;</mo><mfrac><mrow><mn>1</mn><mo>&#x02212;</mo><msup><mi>g</mi><mn>2</mn></msup></mrow><mrow><mn>1</mn><mo>&#x0002B;</mo><mi>g</mi><mo>&#x02212;</mo><mn>2</mn><mi>g</mi><mi>&#x003BE;</mi></mrow></mfrac><mo stretchy="true" fence="true" form="postfix">&#x00029;</mo></mrow><mn>2</mn></msup><mo stretchy="true" fence="true" form="postfix">&#x00029;</mo></mrow><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>Fog in Raymond scatters forwards (<math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>g</mi><mo>&#x02248;</mo><mn>0.6</mn></mrow></math>), which is why sunbeams glow most looking towards the
+        window. Shadow rays from surfaces and from the fog itself multiply by <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>T</mi></mrow></math> for every volume they cross.</p>
+
+    <h2 id="caustics">11. Caustics</h2>
+
+    <p>The bright, sharp patterns light makes after passing through glass or water, or off a mirror, are
+        <em>caustics</em>, and they defeat everything so far. To see a caustic on the floor, a path from the camera
+        must hit the floor, bounce into the glass at just the right angle, refract twice, and arrive exactly at a
+        small lamp. Aiming at the lamp doesn't help, because the glass is in the way and bends the ray off it; a
+        perfect point light could never be found at all. Raymond attacks caustics from the other end, from the
+        lights.</p>
+
+    <h3>Light tracing</h3>
+
+    <p>Each frame, alongside the camera paths, Raymond sends <em>photons</em> out of the lights (<code>light_trace</code>),
+        chosen by power. Each carries power <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x003A6;</mi></mrow></math> and follows mirrors and glass, until it lands on some other
+        surface. Then it is connected straight to the camera (<code>splat()</code>) and adds to the pixel that sees
+        that point:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>&#x00394;</mi><msub><mi>L</mi><mrow><mtext>pixel</mtext></mrow></msub><mo>&#x0003D;</mo><mfrac><mrow><mi>&#x003A6;</mi><mspace width="0.278em" /><mi>f</mi><mo stretchy="false">&#x00028;</mo><msub><mi>&#x003C9;</mi><mrow><mtext>photon</mtext></mrow></msub><mo>&#x0002C;</mo><msub><mi>&#x003C9;</mi><mrow><mtext>camera</mtext></mrow></msub><mo stretchy="false">&#x00029;</mo><mspace width="0.167em" /><mi>cos</mi><msub><mi>&#x003B8;</mi><mi>s</mi></msub></mrow><mrow><msup><mi>d</mi><mn>2</mn></msup><mspace width="0.167em" /><msub><mi>A</mi><mrow><mtext>pixel</mtext></mrow></msub><mspace width="0.167em" /><msup><mi>cos</mi><mn>3</mn></msup><msub><mi>&#x003B8;</mi><mi>c</mi></msub></mrow></mfrac><mo>&#x0002C;</mo></mrow></math></div>
+
+    <p>where <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>d</mi></mrow></math> is the distance to the camera, <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>&#x003B8;</mi><mi>s</mi></msub></mrow></math> the angle at the surface, <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>&#x003B8;</mi><mi>c</mi></msub></mrow></math> the angle off the
+        middle of the view, and <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>A</mi><mrow><mtext>pixel</mtext></mrow></msub></mrow></math> a pixel's area on a screen at unit distance: the camera's
+        <em>importance</em>, the exact counterpart of radiance going the other way. The camera paths leave out
+        precisely the paths light tracing counts (camera, then a surface, then only mirrors and glass, then a light),
+        so nothing is counted twice.</p>
+
+    <p>Photons are aimed. A photon that misses every mirror and glass object can't make a caustic, so a lamp's photons
+        are aimed into the cone of a sphere round one of those objects, chosen by the solid angle it covers. Where
+        cones overlap, a direction could have come from any of them, so the density is the mixture of all of them; it
+        simplifies to the number of cones the direction lies in, <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>k</mi></mrow></math>, over their total:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>p</mi><mo stretchy="false">&#x00028;</mo><mi>&#x003C9;</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0003D;</mo><mfrac><mrow><mi>k</mi><mo stretchy="false">&#x00028;</mo><mi>&#x003C9;</mi><mo stretchy="false">&#x00029;</mo></mrow><mrow><msub><mo>&#x02211;</mo><mi>j</mi></msub><mn>2</mn><mi>&#x003C0;</mi><mrow><mo stretchy="true" fence="true" form="prefix">&#x00028;</mo><mn>1</mn><mo>&#x02212;</mo><mi>cos</mi><msub><mi>&#x003B8;</mi><mi>j</mi></msub><mo stretchy="true" fence="true" form="postfix">&#x00029;</mo></mrow></mrow></mfrac><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>Many photons add to the same pixel at once on the GPU, which can only add whole numbers atomically. Each value is
+        stored in units of <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msup><mn>2</mn><mrow><mo>&#x02212;</mo><mn>16</mn></mrow></msup></mrow></math>, rounded up or down at random in proportion,</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mo>E</mo><mspace width="negativethinmathspace" /><mrow><mo stretchy="true" fence="true" form="prefix">[</mo><mi>&#x0230A;</mi><mi>x</mi><mo>&#x0002B;</mo><mi>&#x003BE;</mi><mi>&#x0230B;</mi><mo stretchy="true" fence="true" form="postfix">]</mo></mrow><mo>&#x0003D;</mo><mi>x</mi><mo>&#x0002C;</mo></mrow></math></div>
+
+    <p>so even photons far fainter than one unit add up to the right total on average. (Rounding to nearest instead
+        once made a dim scene 12% too dark.)</p>
+
+    <h3>Photon mapping</h3>
+
+    <p>Light tracing can't reach the camera through glass: a caustic on the floor of a pool, seen through the water,
+        would need the connection to refract too. For those, the photons are also stored where they land, in a grid
+        hashed by position (<em>photon mapping</em>, Jensen 1996). A camera path that has passed through mirrors and
+        glass and reaches another surface then gathers the photons within a radius <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>r</mi></mrow></math> of the point it hit:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>L</mi><mo>&#x02248;</mo><mfrac><mrow><mn>1</mn></mrow><mrow><mi>&#x003C0;</mi><msup><mi>r</mi><mn>2</mn></msup></mrow></mfrac><munder><mo>&#x02211;</mo><mrow><mi>p</mi></mrow></munder><mi>f</mi><mo stretchy="false">&#x00028;</mo><msub><mi>&#x003C9;</mi><mi>p</mi></msub><mo>&#x0002C;</mo><msub><mi>&#x003C9;</mi><mi>o</mi></msub><mo stretchy="false">&#x00029;</mo><mspace width="0.167em" /><msub><mi>&#x003A6;</mi><mi>p</mi></msub><mo>&#x0002C;</mo></mrow></math></div>
+
+    <p>summing over the photons <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>p</mi></mrow></math> that landed within <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>r</mi></mrow></math> of <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D431;</mi></mrow></math>, each with power <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>&#x003A6;</mi><mi>p</mi></msub></mrow></math>, arriving from
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>&#x003C9;</mi><mi>p</mi></msub></mrow></math>. That's a density estimate, slightly blurred by <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>r</mi></mrow></math>. <em>Progressive</em> photon mapping (Hachisuka, 2008)
+        shrinks the radius as frames go by, <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>r</mi><mi>k</mi></msub><mo>&#x0003D;</mo><msub><mi>r</mi><mn>0</mn></msub><mspace width="0.167em" /><msup><mi>k</mi><mrow><mo>&#x02212;</mo><mn>1</mn><mo>&#x0002F;</mo><mn>6</mn></mrow></msup></mrow></math> (so <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msup><mi>r</mi><mn>2</mn></msup></mrow></math> falls as <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msup><mi>k</mi><mrow><mo>&#x02212;</mo><mn>1</mn><mo>&#x0002F;</mo><mn>3</mn></mrow></msup></mrow></math>), slowly enough
+        that more and more photons still land inside it. The blur and the noise both vanish together, and the average
+        converges to the right answer.</p>
+
+    <h2 id="denoising">12. Denoising</h2>
+
+    <p>A young image is noisy. The denoiser smooths it while keeping edges, by averaging each pixel with neighbours
+        that see the same kind of surface, and it backs off as the real samples take over. It works on <em>light</em>
+        rather than colour: each pixel's average is divided by the colour of the surface it sees (an albedo guide the
+        path tracer records), so textures aren't smeared, and multiplied back at the end.</p>
+
+    <p>Each pixel's noise comes from its own samples. With <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>n</mi></mrow></math> samples of luminance <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>l</mi></mrow></math>, the variance of their
+        mean is</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mo>Var</mo><mo stretchy="false">[</mo><mover><mi>l</mi><mo stretchy="true">&#x000AF;</mo></mover><mo stretchy="false">]</mo><mo>&#x02248;</mo><mfrac><mrow><mn>1</mn></mrow><mrow><mi>n</mi><mo>&#x02212;</mo><mn>1</mn></mrow></mfrac><mrow><mo stretchy="true" fence="true" form="prefix">&#x00028;</mo><mfrac><mrow><mn>1</mn></mrow><mrow><mi>n</mi></mrow></mfrac><munderover><mo>&#x02211;</mo><mrow><mi>k</mi><mo>&#x0003D;</mo><mn>1</mn></mrow><mrow><mi>n</mi></mrow></munderover><msubsup><mi>l</mi><mi>k</mi><mn>2</mn></msubsup><mo>&#x02212;</mo><msup><mover><mi>l</mi><mo stretchy="true">&#x000AF;</mo></mover><mrow><mspace width="0.167em" /><mn>2</mn></mrow></msup><mo stretchy="true" fence="true" form="postfix">&#x00029;</mo></mrow><mo>&#x0002C;</mo></mrow></math></div>
+
+    <p>which is why each pixel's sum of squared luminances is kept alongside its sum of colours.</p>
+
+    <p>Then five passes of an <em>à-trous</em> ("with holes") wavelet filter (Dammertz et al., 2010) each blend a
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mn>5</mn><mo>&#x000D7;</mo><mn>5</mn></mrow></math> grid of neighbours spaced <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>s</mi><mo>&#x0003D;</mo><mn>1</mn><mo>&#x0002C;</mo><mn>2</mn><mo>&#x0002C;</mo><mn>4</mn><mo>&#x0002C;</mo><mn>8</mn><mo>&#x0002C;</mo><mn>16</mn></mrow></math> pixels apart, so together they reach 62 pixels each way
+        for the cost of 125 lookups. The kernel is the B-spline <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>h</mi><mo>&#x0003D;</mo><mo stretchy="false">&#x00028;</mo><mstyle displaystyle="false" scriptlevel="0"><mfrac><mn>1</mn><mrow><mn>16</mn></mrow></mfrac></mstyle><mo>&#x0002C;</mo><mstyle displaystyle="false" scriptlevel="0"><mfrac><mn>1</mn><mn>4</mn></mfrac></mstyle><mo>&#x0002C;</mo><mstyle displaystyle="false" scriptlevel="0"><mfrac><mn>3</mn><mn>8</mn></mfrac></mstyle><mo>&#x0002C;</mo><mstyle displaystyle="false" scriptlevel="0"><mfrac><mn>1</mn><mn>4</mn></mfrac></mstyle><mo>&#x0002C;</mo><mstyle displaystyle="false" scriptlevel="0"><mfrac><mn>1</mn><mrow><mn>16</mn></mrow></mfrac></mstyle><mo stretchy="false">&#x00029;</mo></mrow></math>, and each
+        neighbour <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>q</mi></mrow></math> of pixel <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>p</mi></mrow></math> is weighted by how alike they are:</p>
+
+    <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><msub><mi>w</mi><mrow><mi>p</mi><mi>q</mi></mrow></msub><mo>&#x0003D;</mo><msub><mi>h</mi><mi>x</mi></msub><msub><mi>h</mi><mi>y</mi></msub><mo>&#x000B7;</mo><mo>max</mo><mo stretchy="false">&#x00028;</mo><mn>0</mn><mo>&#x0002C;</mo><msub><mi>&#x1D427;</mi><mi>p</mi></msub><mo>&#x000B7;</mo><msub><mi>&#x1D427;</mi><mi>q</mi></msub><msup><mo stretchy="false">&#x00029;</mo><mrow><mn>64</mn></mrow></msup><mo>&#x000B7;</mo><mi>exp</mi><mspace width="negativethinmathspace" /><mrow><mo stretchy="true" fence="true" form="prefix">&#x00028;</mo><mo>&#x02212;</mo><mfrac><mrow><mo stretchy="false">&#x0007C;</mo><msub><mi>z</mi><mi>p</mi></msub><mo>&#x02212;</mo><msub><mi>z</mi><mi>q</mi></msub><mo stretchy="false">&#x0007C;</mo></mrow><mrow><mn>0.02</mn><mspace width="0.167em" /><msub><mi>z</mi><mi>p</mi></msub><mspace width="0.167em" /><mi>s</mi></mrow></mfrac><mo stretchy="true" fence="true" form="postfix">&#x00029;</mo></mrow><mo>&#x000B7;</mo><mi>exp</mi><mspace width="negativethinmathspace" /><mrow><mo stretchy="true" fence="true" form="prefix">&#x00028;</mo><mo>&#x02212;</mo><mfrac><mrow><mo stretchy="false">&#x0007C;</mo><msub><mi>l</mi><mi>p</mi></msub><mo>&#x02212;</mo><msub><mi>l</mi><mi>q</mi></msub><mo stretchy="false">&#x0007C;</mo></mrow><mrow><mn>4</mn><msub><mi>&#x003C3;</mi><mi>p</mi></msub></mrow></mfrac><mo stretchy="true" fence="true" form="postfix">&#x00029;</mo></mrow><mo>&#x0002E;</mo></mrow></math></div>
+
+    <p>The normals <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>&#x1D427;</mi></mrow></math> and distances <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mi>z</mi></mrow></math> stop it blurring across edges; the last factor stops it blurring
+        across real changes of brightness, relative to the noise <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>&#x003C3;</mi><mi>p</mi></msub></mrow></math> expected there. As samples build up,
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msub><mi>&#x003C3;</mi><mi>p</mi></msub></mrow></math> shrinks, the weights narrow, and the filter fades into the plain average. The variance is carried
+        through each pass too, as <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mo>&#x02211;</mo><msup><mi>w</mi><mn>2</mn></msup><mo>Var</mo><mo minsize="1.2em" maxsize="1.2em">/</mo><msup><mrow><mo stretchy="true" fence="true" form="prefix">&#x00028;</mo><mo>&#x02211;</mo><mi>w</mi><mo stretchy="true" fence="true" form="postfix">&#x00029;</mo></mrow><mn>2</mn></msup></mrow></math>, so later passes know how much noise is left.</p>
+
+    <h2 id="display">13. From numbers to colours</h2>
+
+    <p>The average is radiance: linear light, with no upper limit (a lamp might be 50, a wall 0.3). Turning it into a
+        screen colour takes three steps (<code>fragment()</code> in the display shader):</p>
+
+    <ol>
+        <li><strong>Exposure:</strong> multiply by <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><msup><mn>2</mn><mrow><mtext>EV</mtext></mrow></msup></mrow></math>, as a camera does.</li>
+        <li><strong>Tone mapping:</strong> squeeze unlimited brightness into 0 to 1 with a film-like curve, Narkowicz's
+            fit to ACES:
+            <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>T</mi><mo stretchy="false">&#x00028;</mo><mi>x</mi><mo stretchy="false">&#x00029;</mo><mo>&#x0003D;</mo><mfrac><mrow><mi>x</mi><mspace width="0.167em" /><mo stretchy="false">&#x00028;</mo><mn>2.51</mn><mi>x</mi><mo>&#x0002B;</mo><mn>0.03</mn><mo stretchy="false">&#x00029;</mo></mrow><mrow><mi>x</mi><mspace width="0.167em" /><mo stretchy="false">&#x00028;</mo><mn>2.43</mn><mi>x</mi><mo>&#x0002B;</mo><mn>0.59</mn><mo stretchy="false">&#x00029;</mo><mo>&#x0002B;</mo><mn>0.14</mn></mrow></mfrac><mo>&#x0002E;</mo></mrow></math></div>
+            Highlights roll off gently instead of clipping to flat white.</li>
+        <li><strong>sRGB encoding:</strong> screens expect values spaced for the eye, not linear light:
+            <div class="equation"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>C</mi><mo>&#x0003D;</mo><mrow><mo stretchy="true" fence="true" form="prefix">&#x0007B;</mo><mtable><mtr><mtd columnalign="left"><mn>12.92</mn><mspace width="0.167em" /><mi>x</mi></mtd><mtd columnalign="left"><mi>x</mi><mo>&#x02264;</mo><mn>0.0031308</mn></mtd></mtr><mtr><mtd columnalign="left"><mn>1.055</mn><mspace width="0.167em" /><msup><mi>x</mi><mrow><mn>1</mn><mo>&#x0002F;</mo><mn>2.4</mn></mrow></msup><mo>&#x02212;</mo><mn>0.055</mn></mtd><mtd columnalign="left"><mtext>otherwise.</mtext></mtd></mtr></mtable></mrow></mrow></math></div></li>
+    </ol>
+
+    <p>"Tame fireflies" clamps each sample's brightest channel at 10 before it's added. That trades a little accuracy
+        for removing the rare enormous samples (a path that found a lamp by a lucky bounce) that would otherwise take
+        thousands of samples to average away.</p>
+
+    <h2 id="gpu">14. On the GPU</h2>
+
+    <p>All of this runs in WebGPU compute shaders, written in WGSL. Each pixel is one GPU thread, in workgroups of
+        <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mn>8</mn><mo>&#x000D7;</mo><mn>8</mn></mrow></math>, and each frame does, in order:</p>
+
+    <div class="table">
+        <table>
+            <thead>
+                <tr><th>Pass</th><th>What it does</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>main</code></td><td>Traces the frame's paths for every pixel and adds them to the running sums,
+                    with the denoiser's guides (albedo, normal and distance).</td></tr>
+                <tr><td><code>light_trace</code></td><td>Sends photons from the lights, splatting caustics and storing photons
+                    (only with mirrors or glass in the scene).</td></tr>
+                <tr><td><code>resolve_splats</code></td><td>Adds the frame's splats into the sums.</td></tr>
+                <tr><td><code>photon_gather</code></td><td>Gathers photons for what's seen through glass.</td></tr>
+                <tr><td><code>prepare</code>, <code>atrous</code> ×5, <code>compose</code></td><td>The denoiser.</td></tr>
+                <tr><td><code>fragment</code></td><td>Exposure, tone mapping and sRGB, drawn to the screen.</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <p>The scene is flattened into arrays the shader reads directly: 64 bytes per primitive, 96 per material, 32 per BVH
+        node. Anything that changes the image (the camera, the scene, the bounce limit) is noticed by comparing the
+        uniforms with last frame's, and restarts the average. The shader is compiled separately for each combination of
+        features a scene uses (fog, textures, a panorama, dispersion), with the rest left out entirely: even code that
+        never runs slowed the rest down by up to 38%.</p>
+
+    <p>Random numbers come from a PCG hash, seeded by pixel and sample number, so the same scene renders identically
+        every time. Every path is independent of every other, which is what makes path tracing such a natural fit for a
+        GPU: millions of pixels, each doing the same simple loop, at once.</p>
+
+    <h2 id="reading">Further reading</h2>
+
+    <ul>
+        <li>Matt Pharr, Wenzel Jakob and Greg Humphreys, <a href="https://pbr-book.org/"><em>Physically Based Rendering</em></a>,
+            free online: the reference for nearly everything here.</li>
+        <li>James Kajiya, "The rendering equation", SIGGRAPH 1986.</li>
+        <li>Eric Veach, <em>Robust Monte Carlo Methods for Light Transport Simulation</em>, PhD thesis, 1997: multiple
+            importance sampling, and much more.</li>
+        <li>Bruce Walter et al., "Microfacet models for refraction through rough surfaces", EGSR 2007: GGX.</li>
+        <li>Henrik Wann Jensen, "Global illumination using photon maps", 1996; Toshiya Hachisuka et al., "Progressive
+            photon mapping", SIGGRAPH Asia 2008.</li>
+        <li>Holger Dammertz et al., "Edge-avoiding À-trous wavelet transform for fast global illumination filtering",
+            HPG 2010.</li>
+        <li>Peter Shirley, <a href="https://raytracing.github.io/"><em>Ray Tracing in One Weekend</em></a>: the gentlest
+            way to write your own.</li>
+    </ul>
+
+    <p class="back"><a href="./">← Back to Raymond</a></p>
+
+</body>
+
+</html>

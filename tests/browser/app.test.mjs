@@ -871,6 +871,27 @@ test("the example page renders with the library by its package name", async () =
     await context.close();
 });
 
+test("the how-it-works page has its maths, and the settings panel links to it", async () => {
+
+    const { page, errors, context } = await open("how-it-works.html");
+    assert.ok(await page.locator("math").count() > 100, "the equations are MathML");
+    const text = await page.evaluate(() => document.body.innerText);
+    assert.ok(!text.includes("$$") && !text.includes("\\("), "no LaTeX left unconverted");
+    // MathML laid out as maths, not run together as text: a fraction is
+    // taller than a line.
+    const height = await page.locator(".equation mfrac").first().evaluate((e) => e.getBoundingClientRect().height);
+    assert.ok(height > 25, `a fraction ${height}px tall`);
+    // Every link within the page goes somewhere.
+    for (const href of await page.locator('a[href^="#"]').evaluateAll((as) => as.map((a) => a.getAttribute("href"))))
+        assert.equal(await page.locator(href).count(), 1, href);
+    assert.deepEqual(errors, []);
+
+    const app = await open("index.html");
+    assert.equal(await app.page.locator('#settings a[href="how-it-works.html"]').count(), 1);
+    await app.context.close();
+    await context.close();
+});
+
 test("the service worker registers and takes control", async () => {
 
     const { page, errors, context } = await open("index.html", { serviceWorkers: true });
