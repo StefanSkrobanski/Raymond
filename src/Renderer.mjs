@@ -176,6 +176,8 @@ export class Renderer {
     #pixel_buffers = [];
     #width = 0;
     #height = 0;
+    // How many pixels the per-pixel buffers have room for.
+    #capacity = 0;
 
     /** @type {GPUBindGroup | null} */
     #trace_group = null;
@@ -753,6 +755,18 @@ export class Renderer {
      */
     #resize(width, height) {
 
+        // The buffers are kept when they're big enough, so moving the
+        // camera (which drops to a smaller preview and back) doesn't free
+        // and allocate them all each time: a phone frees GPU memory lazily,
+        // and the churn got Safari on iOS killed for using too much.
+        // Everything indexes the buffers by the current width.
+        if (this.#accum && width * height <= this.#capacity) {
+            this.#width = width;
+            this.#height = height;
+            this.#samples = 0;
+            return;
+        }
+
         this.#accum?.destroy();
         for (const buffer of this.#pixel_buffers)
             buffer.destroy();
@@ -766,6 +780,7 @@ export class Renderer {
 
         this.#accum = pixels("accumulation");
         this.#pixel_buffers = ["guide albedo", "guide normal", "light a", "light b", "denoised", "splats"].map(pixels);
+        this.#capacity = width * height;
 
         this.#width = width;
         this.#height = height;

@@ -155,6 +155,24 @@ test("the GPU sees what the CPU raycast sees, through every pixel", async () => 
     assert.ok(wrong <= size * size * 0.005, `${wrong} pixels disagree`);
 });
 
+test("shrinking the image and growing it back keeps every pixel in its place", async () => {
+
+    // The renderer keeps its per-pixel buffers when the image shrinks (a
+    // preview while the camera moves), indexing them by the new width; it
+    // must still match the CPU at each size.
+    for (const size of [56, 24, 40, 56]) {
+        const depth = await trace("mixed", { view: "depth", spp: 1, size });
+        let wrong = 0;
+        for (let i = 0; i < size * size; ++i) {
+            const hit = depth.hits[i];
+            const gpu = depth.pixels[i * 4];
+            if (hit ? Math.abs(gpu - hit.distance) > 1e-3 * hit.distance : gpu != 0)
+                wrong++;
+        }
+        assert.ok(wrong <= size * size * 0.01, `${wrong} pixels wrong at ${size} × ${size}`);
+    }
+});
+
 test("the albedo view shows each surface's colour", async () => {
 
     const size = 48;
