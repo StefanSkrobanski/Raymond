@@ -43,6 +43,7 @@
             --muted: #555b66;
             --surface: rgba(255, 255, 255, 0.92);
             --button: rgba(255, 255, 255, 0.85);
+            --menu: #ffffff;
             --border: rgba(0, 0, 0, 0.22);
             --shadow: rgba(0, 0, 0, 0.25);
             --accent: #d9480f;
@@ -55,6 +56,7 @@
             --muted: #9aa1ad;
             --surface: rgba(20, 23, 31, 0.9);
             --button: rgba(30, 34, 44, 0.85);
+            --menu: #1b1f29;
             --border: rgba(255, 255, 255, 0.2);
             --shadow: rgba(0, 0, 0, 0.6);
             --accent: #ff8a4c;
@@ -126,12 +128,31 @@
             margin: 0;
             padding: 0 22px 0 0;
             border: 0;
-            background: transparent;
+            border-radius: 4px;
+            /* Solid, rather than transparent: the list that opens takes its
+               colours from here, and over a transparent one the light text
+               of the dark theme was hard to read. */
+            background-color: var(--menu);
             color: var(--text);
             font: inherit;
             font-size: 16px;
             font-weight: 600;
             cursor: pointer;
+        }
+
+        #scene option,
+        #scene optgroup {
+            background-color: var(--menu);
+            color: var(--text);
+            font-size: 15px;
+        }
+
+        #scene optgroup {
+            color: var(--muted);
+        }
+
+        #scene option {
+            font-weight: 400;
         }
 
         #scene:focus-visible {
