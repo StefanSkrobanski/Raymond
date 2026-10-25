@@ -724,7 +724,7 @@ test("moving the camera shows a fast preview, then the full image once it stops"
         stats: document.getElementById("stats").textContent,
     }));
 
-    // Mid-drag: smaller, fewer bounces, a sample a frame, and it says so,
+    // Mid-drag: smaller, a sample a frame, and it says so,
     // straight away, before the frame being drawn (which on a slow machine
     // takes seconds) is done.
     await page.mouse.move(240, 160);
@@ -732,7 +732,9 @@ test("moving the camera shows a fast preview, then the full image once it stops"
     await page.mouse.move(260, 160, { steps: 4 });
     const during = await now();
     assert.ok(during.width < full.width, `preview width ${during.width} of ${full.width}`);
-    assert.ok(during.bounces <= 3 && during.samplesPerFrame == 1);
+    assert.ok(during.samplesPerFrame == 1);
+    // But as many bounces, so the colours don't change as the camera moves.
+    assert.equal(during.bounces, full.bounces);
     assert.match(during.stats, /preview/);
 
     // Held still, then let go: back to full quality.

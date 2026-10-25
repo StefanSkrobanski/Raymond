@@ -17,7 +17,7 @@ A progressive path tracer for WebGPU, in plain JavaScript ES modules with no dep
 - **Light tracing for caustics:** alongside the paths from the camera, light is traced from the lamps and the sun through mirrors and glass and connected straight to the camera, so the light they focus onto surfaces comes out sharp in a fraction of the samples; the path tracer leaves those paths to it, so nothing is counted twice. Caustics seen through glass or water, like a pool's floor, come from the same light stored as a photon map, gathered at whatever the camera sees through the glass.
 - **A denoiser** that clears the grain from the first few samples: an edge-avoiding à-trous wavelet filter guided by each pixel's albedo, normal and distance, and steered by an estimate of its noise (as in SVGF), so it backs off as the samples build up and the image still converges to the exact answer.
 - **A thin-lens camera** with depth of field, and **inspection views** of albedo, normals and depth.
-- **A fast preview while you move the camera** in the demo: fewer bounces at a lower resolution, which adapts to keep about 30 frames a second on whatever device it's on, then the full image the moment you stop.
+- **A fast preview while you move the camera** in the demo: a lower resolution, with the same bounces so the colours stay put, which adapts to keep about 30 frames a second on whatever device it's on, then the full image the moment you stop.
 - **Orbit controls** for mouse, touch and pen, adapted from [Styx](https://github.com/StefanSkrobanski/Styx), whose maths library Raymond also uses.
 - **A CPU raycast** with exactly the shader's tests, on the same packed data, for picking (tap to orbit round a point and focus there) and for testing the GPU.
 

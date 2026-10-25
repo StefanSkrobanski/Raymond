@@ -24,11 +24,12 @@ const APERTURE_SCALE = 0.04;
 const TAP_APPROACH = 0.5;
 
 // The fast preview while the camera moves: how long a frame should take,
-// the most bounces, the range of its resolution (a fraction of the full
-// one, each way), and how long after the last move to go back to full
-// quality.
+// the range of its resolution (a fraction of the full one, each way), and
+// how long after the last move to go back to full quality. It keeps the
+// full number of bounces, paying in resolution instead: with fewer, the
+// colours shifted as the camera moved (a scene lit by light bouncing round
+// it came out up to a third darker) and jumped back when it stopped.
 const PREVIEW_FRAME_MS = 33;
-const PREVIEW_BOUNCES = 3;
 const PREVIEW_SCALES = { min: 0.15, max: 1.0 };
 const SETTLE_MS = 250;
 
@@ -203,7 +204,7 @@ function adaptPreview(ms) {
 // The renderer's settings that the preview cheapens: fewer bounces, one
 // sample a frame, always denoised.
 function applyQuality() {
-    renderer.maxBounces = moving ? Math.min(settings.bounces, PREVIEW_BOUNCES) : settings.bounces;
+    renderer.maxBounces = settings.bounces;
     renderer.samplesPerFrame = moving ? 1 : settings.samples_per_frame;
     renderer.denoise = moving || settings.denoise;
     resize();
