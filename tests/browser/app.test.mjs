@@ -592,7 +592,9 @@ test("denoising brings a few samples much closer to the converged image", async 
     const size = 96;
     const reference = await roomReference(size);
 
-    for (const [spp, factor] of [[1, 0.5], [4, 0.7]]) {
+    // (Sobol sampling and choosing lights by power took the noisy error at 1 spp from
+    // 0.050 to 0.035, leaving the denoiser less to remove: 0.020 to 0.019.)
+    for (const [spp, factor] of [[1, 0.6], [4, 0.7]]) {
 
         const noisy = await trace("room", { spp, size, bounces: 4, denoise: true });
         const before = rmse(noisy.pixels, reference.pixels);
