@@ -565,7 +565,10 @@
 
     $$L \leftarrow L + \boldsymbol\beta\,\frac{f(\omega_l,\omega_o)\,\cos\theta\; L_e}{p_l(\omega_l)} .$$
 
-    <p>A light is chosen evenly among the lamps, the sun and the sky, and the density includes that chance. For a
+    <p>The sun and the sky each get an even share of the choice, and the lamps share the rest: three quarters of it in
+        proportion to each lamp's power \(\Phi = \pi A L_e\), a quarter evenly, so a dim fill panel doesn't take half
+        the rays from a bright bulb, yet a weak lamp right beside a surface, which can matter more there than a strong
+        one across the room, still gets its turn. The density includes the chance of that choice. For a
         rectangular lamp of area \(A\), a point is chosen evenly on it, density \(1/A\) per area, which has to be
         turned into a density per solid angle, as seen from the surface: a patch \(\mathrm{d}A\) at distance \(r\),
         tilted by \(\theta_l\) from facing us, covers \(\mathrm{d}\omega = \cos\theta_l\,\mathrm{d}A/r^2\), so</p>
@@ -768,9 +771,19 @@
         features a scene uses (fog, textures, a panorama, dispersion), with the rest left out entirely: even code that
         never runs slowed the rest down by up to 38%.</p>
 
-    <p>Random numbers come from a PCG hash, seeded by pixel and sample number, so the same scene renders identically
-        every time. Every path is independent of every other, which is what makes path tracing such a natural fit for a
-        GPU: millions of pixels, each doing the same simple loop, at once.</p>
+    <p>The random numbers aren't quite random. Truly random points clump and leave gaps, and averaging them, the error
+        falls only as \(1/\sqrt{N}\). Each pixel's samples instead take their numbers from a <em>Sobol sequence</em>,
+        whose first \(N\) points, for any \(N\) a power of 2, fall one in each of \(N\) equal slices, both across
+        and up a square, and nearly so in between. Each use of random numbers in a path (the pixel position, the lens,
+        each bounce's direction, each light's point) is a separate <em>dimension</em>, given a pair of Sobol's
+        coordinates of its own. Using one sequence everywhere would line every pixel's errors up into patterns, so
+        each pixel scrambles its own, flipping the bits of each number in a way that keeps the even spread (Owen
+        scrambling, here by hashing, following Burley). The leftover noise looks random, but there's less of it, and
+        it falls faster than \(1/\sqrt{N}\): in Raymond's demo scenes the same quality comes in roughly half to
+        four fifths of the time. The light-tracing photons, each on its own, use a
+        plain PCG hash. Both are seeded by pixel and sample number, so the same scene renders identically every
+        time. Every path is independent of every other pixel's, which is what makes path tracing such a natural fit
+        for a GPU: millions of pixels, each doing the same simple loop, at once.</p>
 
     <h2 id="reading">Further reading</h2>
 
@@ -783,6 +796,7 @@
         <li>Bruce Walter et al., "Microfacet models for refraction through rough surfaces", EGSR 2007: GGX.</li>
         <li>Henrik Wann Jensen, "Global illumination using photon maps", 1996; Toshiya Hachisuka et al., "Progressive
             photon mapping", SIGGRAPH Asia 2008.</li>
+        <li>Brent Burley, "Practical hash-based Owen scrambling", JCGT 2020: the scrambled Sobol sequences.</li>
         <li>Holger Dammertz et al., "Edge-avoiding À-trous wavelet transform for fast global illumination filtering",
             HPG 2010.</li>
         <li>Peter Shirley, <a href="https://raytracing.github.io/"><em>Ray Tracing in One Weekend</em></a>: the gentlest
