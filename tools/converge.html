@@ -1,0 +1,44 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Raymond convergence</title>
+<canvas id="canvas" width="96" height="72"></canvas>
+<script type="module">
+    // Renders demo scenes to a number of samples per pixel and reads the
+    // image back: see tools/converge.mjs, which drives this page.
+    import { Camera, Renderer } from "../src/index.mjs";
+    import { SCENES } from "../Scenes.mjs";
+
+    const canvas = document.getElementById("canvas");
+    const renderer = await Renderer.create(canvas);
+
+    // The average after samples paths per pixel, and how long they took.
+    window.render = async (id, samples) => {
+
+        const demo = SCENES.find((s) => s.id == id);
+        const built = demo.build();
+        renderer.scene = built.scene;
+        renderer.camera = new Camera(built.camera);
+        renderer.maxBounces = built.bounces ?? 8;
+        renderer.denoise = false;
+        renderer.samplesPerFrame = Math.min(samples, 16);
+
+        // Let the scene's own pipelines get made before timing.
+        const warm = performance.now();
+        for (let i = 0; i < 2 || performance.now() - warm < 1500; ++i) {
+            renderer.render();
+            await renderer.device.queue.onSubmittedWorkDone();
+        }
+
+        renderer.reset();
+        const start = performance.now();
+        while (renderer.samples < samples) {
+            renderer.render();
+            await renderer.device.queue.onSubmittedWorkDone();
+        }
+        const seconds = (performance.now() - start) / 1000;
+        const pixels = await renderer.readPixels();
+        return { seconds, samples: renderer.samples, pixels: Array.from(pixels) };
+    };
+
+    window.ready = true;
+</script>

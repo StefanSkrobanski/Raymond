@@ -137,9 +137,77 @@ fn pcg(v: u32) -> u32 {
     return (word >> 22u) ^ word;
 }
 
+fn unit(x: u32) -> f32 {
+    return f32(x >> 8u) * (1.0 / 16777216.0);
+}
+
+// ---- Random numbers for camera paths: scrambled Sobol ----
+
+// A pixel's samples don't each draw at random: each "dimension" (the
+// lens, a bounce's direction, a light's point, ...) is a scrambled Sobol
+// sequence, so a pixel's first n samples spread over it evenly rather than
+// clumping, and the average settles faster. Each pixel scrambles its own,
+// so the leftover noise looks random rather than patterned (Burley,
+// "Practical hash-based Owen scrambling", 2020). Pairs come from Sobol's
+// first two dimensions, a (0, 2)-sequence; separate dimensions are shuffled
+// independently, so they're unrelated. Only main() uses these (qmc_on):
+// light tracing's photons draw from PCG.
+var<private> qmc_on: bool;
+var<private> qmc_seed: u32;   // the pixel's
+var<private> qmc_index: u32;  // which sample of the pixel this is
+var<private> qmc_dim: u32;    // the next dimension: see radiance()
+
+// Owen scrambling, by hashing: flips each bit depending on all the bits
+// above it (Laine and Karras's hash, on the reversed bits).
+fn owen(x: u32, seed: u32) -> u32 {
+    var v = reverseBits(x);
+    v ^= v * 0x3d20adeau;
+    v += seed;
+    v *= (seed >> 16u) | 1u;
+    v ^= v * 0x05526c56u;
+    v ^= v * 0x53a22864u;
+    return reverseBits(v);
+}
+
+// Sobol's second dimension (the first is reverseBits).
+fn sobol2(i: u32) -> u32 {
+    var r = 0u;
+    var v = 0x80000000u;
+    var j = i;
+    while (j != 0u) {
+        if ((j & 1u) != 0u) {
+            r ^= v;
+        }
+        j >>= 1u;
+        v ^= v >> 1u;
+    }
+    return r;
+}
+
+// The next dimension's hash, and which point of its sequence to use.
+fn qmc_next() -> vec2u {
+    let key = pcg(qmc_seed ^ pcg(qmc_dim));
+    qmc_dim++;
+    return vec2u(key, owen(qmc_index, key));
+}
+
 fn rand() -> f32 {
+    if (qmc_on) {
+        let q = qmc_next();
+        return unit(owen(reverseBits(q.y), pcg(q.x)));
+    }
     rng_state = pcg(rng_state);
-    return f32(rng_state >> 8u) * (1.0 / 16777216.0);
+    return unit(rng_state);
+}
+
+// Two numbers to use together, such as a point on a square.
+fn rand2() -> vec2f {
+    if (qmc_on) {
+        let q = qmc_next();
+        return vec2f(unit(owen(reverseBits(q.y), pcg(q.x))), unit(owen(sobol2(q.y), pcg(q.x + 1u))));
+    }
+    let a = rand();
+    return vec2f(a, rand());
 }
 
 // ---- Geometry ----
@@ -156,8 +224,9 @@ fn frame(n: vec3f) -> mat3x3f {
 }
 
 fn cosine_hemisphere(n: vec3f) -> vec3f {
-    let r = sqrt(rand());
-    let phi = 2.0 * PI * rand();
+    let u = rand2();
+    let r = sqrt(u.x);
+    let phi = 2.0 * PI * u.y;
     let local = vec3f(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - r * r)));
     return normalize(frame(n) * local);
 }
@@ -165,14 +234,15 @@ fn cosine_hemisphere(n: vec3f) -> vec3f {
 // A direction within the cone round axis whose half-angle has
 // 1 - cos = omc, uniformly by solid angle.
 fn sample_cone(axis: vec3f, omc: f32) -> vec3f {
-    let cos_t = 1.0 - rand() * omc;
+    let u = rand2();
+    let cos_t = 1.0 - u.x * omc;
     let sin_t = sqrt(max(0.0, 1.0 - cos_t * cos_t));
-    let phi = 2.0 * PI * rand();
+    let phi = 2.0 * PI * u.y;
     return normalize(frame(axis) * vec3f(sin_t * cos(phi), sin_t * sin(phi), cos_t));
 }
 
 fn concentric_disk() -> vec2f {
-    let u = 2.0 * vec2f(rand(), rand()) - 1.0;
+    let u = 2.0 * rand2() - 1.0;
     if (u.x == 0.0 && u.y == 0.0) {
         return vec2f(0.0);
     }
@@ -590,10 +660,12 @@ fn sample_env() -> vec3f {
     let size = textureDimensions(env_table);
     let cw = size.x;
     let ch = size.y - 1u;
-    let y = env_search(ch, ch, rand());
-    let x = env_search(y, cw, rand());
-    let u = (f32(x) + rand()) / f32(cw) + params.env_rotation / (2.0 * PI);
-    let v = (f32(y) + rand()) / f32(ch);
+    let cell = rand2();
+    let y = env_search(ch, ch, cell.y);
+    let x = env_search(y, cw, cell.x);
+    let within = rand2();
+    let u = (f32(x) + within.x) / f32(cw) + params.env_rotation / (2.0 * PI);
+    let v = (f32(y) + within.y) / f32(ch);
     let phi = (u - 0.5) * 2.0 * PI;
     let theta = v * PI;
     return vec3f(sin(theta) * sin(phi), cos(theta), -sin(theta) * cos(phi));
@@ -658,10 +730,11 @@ fn smith_g1(nv: f32, a2: f32) -> f32 {
 
 // A microfacet normal, drawn in proportion to D(h) cos(h).
 fn sample_ggx(n: vec3f, a2: f32) -> vec3f {
-    let r = rand();
+    let u = rand2();
+    let r = u.x;
     let cos_t = sqrt((1.0 - r) / (1.0 + (a2 - 1.0) * r));
     let sin_t = sqrt(max(0.0, 1.0 - cos_t * cos_t));
-    let phi = 2.0 * PI * rand();
+    let phi = 2.0 * PI * u.y;
     return normalize(frame(n) * vec3f(sin_t * cos(phi), sin_t * sin(phi), cos_t));
 }
 
@@ -851,8 +924,9 @@ fn sample_light(p: vec3f) -> LightSample {
     let m = materials[prim.material];
 
     if (prim.kind == QUAD) {
-        let a = rand();
-        let b = rand();
+        let ab = rand2();
+        let a = ab.x;
+        let b = ab.y;
         let q = prim.p0.xyz + prim.p1.xyz * a + prim.p2.xyz * b;
         let to = q - p;
         let d2 = dot(to, to);
@@ -1004,13 +1078,14 @@ fn henyey_greenstein(c: f32, g: f32) -> f32 {
 
 // A direction drawn from henyey_greenstein, for light travelling along d.
 fn sample_henyey_greenstein(d: vec3f, g: f32) -> vec3f {
-    var c = 1.0 - 2.0 * rand();
+    let u = rand2();
+    var c = 1.0 - 2.0 * u.x;
     if (abs(g) >= 1e-3) {
-        let sq = (1.0 - g * g) / (1.0 + g - 2.0 * g * rand());
+        let sq = (1.0 - g * g) / (1.0 + g - 2.0 * g * u.x);
         c = clamp((1.0 + g * g - sq * sq) / (2.0 * g), -1.0, 1.0);
     }
     let sin_t = sqrt(max(0.0, 1.0 - c * c));
-    let phi = 2.0 * PI * rand();
+    let phi = 2.0 * PI * u.y;
     return normalize(frame(d) * vec3f(sin_t * cos(phi), sin_t * sin(phi), c));
 }
 
@@ -1097,6 +1172,10 @@ fn radiance(px: vec2f) -> vec3f {
 
     for (var depth = 0u; depth <= params.max_bounces; depth++) {
 
+        // Each bounce draws from its own block of dimensions, so the same
+        // bounce of every sample uses the same ones, however many earlier
+        // bounces drew.
+        qmc_dim = (depth + 1u) << 16u;
         let hit = trace(o, d, INF, false);
 
         if (VOLUMES) {
@@ -1738,6 +1817,10 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     for (var k = 0u; k < params.samples_per_frame; k++) {
 
         rng_state = pcg(index ^ pcg(params.sample_offset + k));
+        qmc_on = true;
+        qmc_seed = pcg(index + 0x9e3779b9u);
+        qmc_index = params.sample_offset + k;
+        qmc_dim = 0u;
         // In 32-bit fixed point, where 2654435769 is the golden ratio's
         // fractional part, so it stays exact however many samples.
         spectrum_u = f32((pcg(index * 7919u + 1u) + (params.sample_offset + k) * 2654435769u) >> 8u) * (1.0 / 16777216.0);
@@ -1746,7 +1829,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
         g_albedo = vec3f(0.0);
         g_normal = vec4f(0.0);
         if (params.view == VIEW_COLOR) {
-            c = radiance(vec2f(id.xy) + vec2f(rand(), rand()));
+            c = radiance(vec2f(id.xy) + rand2());
             let peak = max(c.x, max(c.y, c.z));
             if (params.firefly_clamp > 0.0 && peak > params.firefly_clamp) {
                 c *= params.firefly_clamp / peak;
