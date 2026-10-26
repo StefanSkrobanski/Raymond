@@ -778,8 +778,9 @@
         each bounce's direction, each light's point) is a separate <em>dimension</em>, given a pair of Sobol's
         coordinates of its own. Using one sequence everywhere would line every pixel's errors up into patterns, so
         each pixel scrambles its own, flipping the bits of each number in a way that keeps the even spread (Owen
-        scrambling, here by hashing, following Burley). The leftover noise looks random, but there's less of it:
-        for smooth lighting the error falls nearly as <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mn>1</mn><mo>&#x0002F;</mo><mi>N</mi></mrow></math>. The light-tracing photons, each on its own, use a
+        scrambling, here by hashing, following Burley). The leftover noise looks random, but there's less of it, and
+        it falls faster than <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mrow><mn>1</mn><mo>&#x0002F;</mo><msqrt><mrow><mi>N</mi></mrow></msqrt></mrow></math>: in Raymond's demo scenes the same quality comes in roughly half to
+        four fifths of the time. The light-tracing photons, each on its own, use a
         plain PCG hash. Both are seeded by pixel and sample number, so the same scene renders identically every
         time. Every path is independent of every other pixel's, which is what makes path tracing such a natural fit
         for a GPU: millions of pixels, each doing the same simple loop, at once.</p>
