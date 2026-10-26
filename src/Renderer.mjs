@@ -575,7 +575,6 @@ export class Renderer {
             storage("nodes", packed.nodes),
             storage("materials", packed.materials),
             storage("attributes", packed.attributes),
-            storage("lights and volumes", new Uint32Array(lights.length + packed.volumes.length > 0 ? [...lights, ...packed.volumes] : [0xffffffff])),
         ];
 
         this.#light_count = lights.length;
@@ -595,6 +594,17 @@ export class Renderer {
             const area = prim_uints[b] == PRIMITIVE_KINDS.quad ? v(8).cross(v(12)).length() : 4 * Math.PI * prim_floats[b + 7] ** 2;
             return { prim, power: luminance * Math.PI * area };
         });
+
+        // Then the lights, the volumes, and for next event estimation, the
+        // running total of the chance of choosing each light (see
+        // lightChances()), as float bits.
+        const chances = lightChances(this.#light_powers.map((l) => l.power));
+        let total = 0;
+        const cumulative = new Float32Array(chances.map((c) => total += c));
+        if (cumulative.length > 0)
+            cumulative[cumulative.length - 1] = 1;
+        const list = [...lights, ...packed.volumes, ...new Uint32Array(cumulative.buffer)];
+        this.#scene_buffers.push(storage("lights and volumes", new Uint32Array(list.length > 0 ? list : [0xffffffff])));
         this.#deltas = deltaObjects(scene);
         this.#emitters?.destroy();
         this.#emitters = this.#device.createBuffer({
@@ -1147,6 +1157,25 @@ function toHalf(x) {
         e++;
     }
     return (e << 10) | mantissa;
+}
+
+// The chance next event estimation gives each light, from their powers:
+// mostly in proportion to power, so a dim fill light doesn't take half
+// the shadow rays from a bright lamp, but with a share spread evenly, so a
+// weak light right next to a surface, which can matter more there than a
+// strong one far off, isn't starved.
+const UNIFORM_SHARE = 0.25;
+
+/**
+ * @param {number[]} powers
+ * @returns {number[]}
+ */
+function lightChances(powers) {
+    const total = powers.reduce((a, b) => a + b, 0);
+    const n = powers.length;
+    if (!(total > 0) || !isFinite(total))
+        return powers.map(() => 1 / n);
+    return powers.map((p) => UNIFORM_SHARE / n + (1 - UNIFORM_SHARE) * p / total);
 }
 
 // The scene's mirrors and glass, for light tracing, or null if there are

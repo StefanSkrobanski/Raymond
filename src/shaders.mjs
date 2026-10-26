@@ -95,7 +95,8 @@ struct Material {
 // Triangles' vertex normals and texture coordinates: see PackedScene.
 @group(0) @binding(4) var<storage, read> attributes: array<vec4f>;
 // The primitives to sample as lights (light_count of them), then the
-// volumes (volume_count).
+// volumes (volume_count), then the lights' running total chances, as float
+// bits (light_cdf()).
 @group(0) @binding(5) var<storage, read> lights: array<u32>;
 // Per pixel, summed over samples: the colour, with the luminance squared in
 // w (for the noise estimate); and the denoiser's guides, the albedo and
@@ -885,6 +886,34 @@ fn env_choice() -> u32 {
     return select(NONE, params.light_count + select(0u, 1u, params.sun_on != 0u), ENVIRONMENT && params.env_strength > 0.0);
 }
 
+// The running total of the lights' chances, up to and including light l,
+// out of 1 (Renderer's lightChances()), stored after the volumes.
+fn light_cdf(l: u32) -> f32 {
+    return bitcast<f32>(lights[params.light_count + params.volume_count + l]);
+}
+
+// The chance of sample_light choosing light l, of all its choices.
+fn light_chance(l: u32) -> f32 {
+    let below = select(0.0, light_cdf(l - 1u), l > 0u);
+    return (light_cdf(l) - below) * f32(params.light_count) / f32(light_choices());
+}
+
+// The light whose share of the running total holds u, from 0 to 1.
+fn pick_light(u: f32) -> u32 {
+    var lo = 0u;
+    var hi = params.light_count - 1u;
+    while (lo < hi) {
+        let mid = (lo + hi) / 2u;
+        if (light_cdf(mid) > u) {
+            hi = mid;
+        }
+        else {
+            lo = mid + 1u;
+        }
+    }
+    return lo;
+}
+
 // 1 - cos of the half-angle a sphere covers from a point at squared
 // distance d2, accurate even when tiny.
 fn sphere_omc(r: f32, d2: f32) -> f32 {
@@ -903,8 +932,9 @@ fn sample_light(p: vec3f) -> LightSample {
 
     let none = LightSample(vec3f(0.0), 0.0, vec3f(0.0), 0.0);
     let choices = light_choices();
-    let pick = min(u32(rand() * f32(choices)), choices - 1u);
-    let chance = 1.0 / f32(choices);
+    let x = rand() * f32(choices);
+    var pick = min(u32(x), choices - 1u);
+    var chance = 1.0 / f32(choices);
 
     if (ENVIRONMENT && pick == env_choice()) {
         let wi = sample_env();
@@ -920,6 +950,9 @@ fn sample_light(p: vec3f) -> LightSample {
         return LightSample(wi, INF, params.sun_radiance, chance / (2.0 * PI * params.sun_omc));
     }
 
+    // One of the lights, then, by their chances.
+    pick = pick_light(x / f32(params.light_count));
+    chance = light_chance(pick);
     let prim = prims[lights[pick]];
     let m = materials[prim.material];
 
@@ -961,7 +994,7 @@ fn sample_light(p: vec3f) -> LightSample {
 fn light_pdf(prim_index: u32, p: vec3f, wi: vec3f, t: f32) -> f32 {
 
     let prim = prims[prim_index];
-    let chance = 1.0 / f32(light_choices());
+    let chance = light_chance(prim.light);
 
     if (prim.kind == QUAD) {
         let c = cross(prim.p1.xyz, prim.p2.xyz);
